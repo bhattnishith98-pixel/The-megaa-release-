@@ -1,12 +1,17 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Message
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -19,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -30,6 +36,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.example.ui.theme.*
 
 data class AiWebPortal(
@@ -41,6 +48,7 @@ data class AiWebPortal(
 object AiStudioWebPortals {
     val presets = listOf(
         AiWebPortal("aistudio", "Google AI Studio", "https://aistudio.google.com"),
+        AiWebPortal("aistudio_apikey", "Get Gemini Key", "https://aistudio.google.com/apikey"),
         AiWebPortal("anthropic", "Anthropic Claude", "https://console.anthropic.com"),
         AiWebPortal("openai", "OpenAI Platform", "https://platform.openai.com"),
         AiWebPortal("openrouter", "OpenRouter", "https://openrouter.ai"),
@@ -61,12 +69,17 @@ object AiStudioWebPortals {
             else -> "https://www.google.com/search?q=" + Uri.encode(trimmed)
         }
     }
+
+    fun isGoogleOAuthUrl(url: String): Boolean =
+        url.contains("accounts.google.com", ignoreCase = true) ||
+            url.contains("disallowed_useragent", ignoreCase = true)
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun AiStudioWebPane(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenAgentKeySetup: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var currentUrl by rememberSaveable { mutableStateOf(AiStudioWebPortals.presets.first().url) }
@@ -76,12 +89,26 @@ fun AiStudioWebPane(
     var loadProgress by remember { mutableIntStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var webError by remember { mutableStateOf<String?>(null) }
+    val isOAuthGate = AiStudioWebPortals.isGoogleOAuthUrl(currentUrl) ||
+        pageTitle.contains("403", ignoreCase = true) ||
+        pageTitle.contains("Sign in", ignoreCase = true)
 
     fun applyUserAgent(wv: WebView, desktop: Boolean) {
         wv.settings.userAgentString = if (desktop) {
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         } else {
-            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        }
+    }
+
+    fun openExternalUrl(targetUrl: String) {
+        val target = AiStudioWebPortals.normalizePortalUrl(targetUrl)
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(target)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure {
+            webError = "No browser app found to open $target"
         }
     }
 
@@ -131,7 +158,9 @@ fun AiStudioWebPane(
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             IconButton(
-                onClick = { webViewRef?.goBack() },
+                onClick = {
+                    if (webViewRef?.canGoBack() == true) webViewRef?.goBack()
+                },
                 modifier = Modifier.size(40.dp).testTag("ai_web_back_btn")
             ) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = CyberCyan)
@@ -167,14 +196,7 @@ fun AiStudioWebPane(
                 Icon(Icons.Filled.Refresh, contentDescription = "Reload", tint = EmeraldRun)
             }
             IconButton(
-                onClick = {
-                    val target = AiStudioWebPortals.normalizePortalUrl(currentUrl)
-                    runCatching {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(target)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                },
+                onClick = { openExternalUrl(currentUrl) },
                 modifier = Modifier.size(40.dp).testTag("ai_web_open_external_btn")
             ) {
                 Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open in External Browser", tint = AmberWarn)
@@ -196,17 +218,43 @@ fun AiStudioWebPane(
             overflow = TextOverflow.Ellipsis
         )
 
-        if (webError != null) {
+        if (webError != null || isOAuthGate) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = SlateCard),
-                modifier = Modifier.fillMaxWidth().border(1.dp, AmberWarn.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, AmberWarn.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
             ) {
-                Text(
-                    "WebView note: $webError — If Google/Anthropic blocks embedded OAuth sign-in, tap the Open Browser icon above.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = AmberWarn,
-                    modifier = Modifier.padding(10.dp)
-                )
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        webError ?: "Google Sign-In blocks embedded WebViews (disallowed_useragent). Open AI Studio in your browser to sign in or copy your Gemini API key, then paste it in Agent Config.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AmberWarn
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { openExternalUrl(currentUrl) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = AmberWarn, contentColor = ObsidianBg),
+                            modifier = Modifier.testTag("ai_web_banner_open_browser_btn")
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Open in Browser", style = MaterialTheme.typography.labelSmall)
+                        }
+                        if (onOpenAgentKeySetup != null) {
+                            OutlinedButton(
+                                onClick = onOpenAgentKeySetup,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("ai_web_banner_setup_key_btn")
+                            ) {
+                                Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(14.dp), tint = CyberCyan)
+                                Spacer(Modifier.width(4.dp))
+                                Text("Paste API Key", style = MaterialTheme.typography.labelSmall, color = CyberCyan)
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -228,6 +276,9 @@ fun AiStudioWebPane(
                         }
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        settings.javaScriptCanOpenWindowsAutomatically = true
                         settings.allowFileAccess = false
                         settings.allowContentAccess = false
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -237,7 +288,7 @@ fun AiStudioWebPane(
                         settings.setSupportZoom(true)
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
-                        settings.setSupportMultipleWindows(false)
+                        settings.setSupportMultipleWindows(true)
                         applyUserAgent(this, desktopMode)
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -247,17 +298,80 @@ fun AiStudioWebPane(
                             override fun onReceivedTitle(view: WebView?, title: String?) {
                                 if (!title.isNullOrBlank()) pageTitle = title
                             }
+
+                            override fun onPermissionRequest(request: PermissionRequest?) {
+                                val req = request ?: return
+                                val allowed = req.resources.filter { res ->
+                                    when (res) {
+                                        PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                            ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                                        PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID -> true
+                                        else -> false
+                                    }
+                                }.toTypedArray()
+                                if (allowed.isNotEmpty()) req.grant(allowed) else req.deny()
+                            }
+
+                            override fun onCreateWindow(
+                                view: WebView?,
+                                isDialog: Boolean,
+                                isUserGesture: Boolean,
+                                resultMsg: Message?
+                            ): Boolean {
+                                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                                val popupWebView = WebView(ctx).apply {
+                                    webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
+                                            val target = request?.url?.toString().orEmpty()
+                                            if (target.startsWith("https://")) {
+                                                if (AiStudioWebPortals.isGoogleOAuthUrl(target)) {
+                                                    openExternalUrl(target)
+                                                } else {
+                                                    webViewRef?.loadUrl(target)
+                                                }
+                                            }
+                                            v?.destroy()
+                                            return true
+                                        }
+                                    }
+                                }
+                                transport.webView = popupWebView
+                                resultMsg.sendToTarget()
+                                return true
+                            }
                         }
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                 val u = request?.url?.toString().orEmpty()
-                                return !(u.startsWith("https://") || u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1"))
+                                if (u.startsWith("https://") || u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1")) {
+                                    if (AiStudioWebPortals.isGoogleOAuthUrl(u)) {
+                                        currentUrl = u
+                                        urlInput = u
+                                    }
+                                    return false
+                                }
+                                if (u.startsWith("http://")) {
+                                    view?.loadUrl("https://" + u.removePrefix("http://"))
+                                    return true
+                                }
+                                return true
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 if (!url.isNullOrBlank()) {
                                     currentUrl = url
                                     urlInput = url
+                                }
+                                runCatching { CookieManager.getInstance().flush() }
+                            }
+
+                            override fun onReceivedHttpError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: WebResourceResponse?
+                            ) {
+                                if (request?.isForMainFrame == true && (errorResponse?.statusCode ?: 0) >= 400) {
+                                    webError = "HTTP ${errorResponse?.statusCode}: ${errorResponse?.reasonPhrase ?: "Request blocked"}"
                                 }
                             }
 

@@ -1,0 +1,6 @@
+{
+  "name": "Automation Studio",
+  "description": "Node Studio, StudioLang custom compiler and VM, Android automation, app builder, and AI Agent workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -57,6 +57,7 @@ fun AppBuilderScreen(
     val customDefs by NodeRegistry.customDefinitions.collectAsStateWithLifecycle()
     val macros by vm.macroEngine.macros.collectAsStateWithLifecycle()
     val studioSource by vm.sourceCode.collectAsStateWithLifecycle()
+    val isAcsBuilding by vm.unifiedIde.isAcsBuilding.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableStateOf("Designer") }
     var selectedScreenIdx by remember { mutableIntStateOf(0) }
@@ -186,12 +187,23 @@ fun AppBuilderScreen(
                             vm.buildAppProject()
                             activeTab = "Build & ZIP"
                         },
+                        enabled = !isAcsBuilding,
                         modifier = Modifier.testTag("build_app_project_button").defaultMinSize(minHeight = 48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
                     ) {
-                        Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Build (ACS)")
+                        if (isAcsBuilding) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = ObsidianBg
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Building...")
+                        } else {
+                            Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Build (ACS)")
+                        }
                     }
                 }
             }
@@ -801,11 +813,22 @@ fun AppBuilderScreen(
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                         Button(
                                             onClick = { vm.buildAppProject() },
+                                            enabled = !isAcsBuilding,
                                             modifier = Modifier.weight(1f).defaultMinSize(minHeight = 48.dp)
                                         ) {
-                                            Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Rebuild Files")
+                                            if (isAcsBuilding) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(16.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = TextPrimary
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Building...")
+                                            } else {
+                                                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Rebuild Files")
+                                            }
                                         }
                                         Button(
                                             onClick = {

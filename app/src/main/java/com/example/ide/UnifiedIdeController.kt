@@ -1,8 +1,12 @@
 package com.example.ide
 
+import android.content.Context
+import android.net.Uri
 import com.example.appbuilder.AndroidProjectGenerator
 import com.example.appbuilder.AppBuildLanguage
 import com.example.appbuilder.AppDesign
+import com.example.runtime.GodotProjectWorkspace
+import com.example.services.StudioTriggerBus
 import com.example.vm.CapabilityManager
 import com.example.vm.HostApiDispatcher
 import com.example.vm.StudioCompiler
@@ -16,6 +20,7 @@ import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 class UnifiedIdeController(
     private val scope: CoroutineScope,
@@ -27,9 +32,13 @@ class UnifiedIdeController(
     private val voiceSpeakCallback: ((String) -> Unit)? = null
 ) {
     private val ideDir = File(workspaceRoot, "unified_ide").apply { mkdirs() }
+    private val defaultSandboxDesc = UniversalProjectManager.defaultSandboxDescriptor(workspaceRoot)
 
     /** Root folder used by native compiler adapters for project-relative source paths. */
-    fun nativeCompilerWorkspaceRoot(): File = ideDir
+    fun nativeCompilerWorkspaceRoot(): File {
+        val local = _activeProject.value.localDirPath
+        return if (local.isNotBlank()) File(local).apply { mkdirs() } else ideDir
+    }
     private val initialNodes: List<GodotSceneNode> = createDefaultSceneNodes()
 
     private val _workspaceMode = MutableStateFlow(IdeWorkspaceMode.DUAL_GAME_AND_APP)
@@ -153,8 +162,30 @@ class UnifiedIdeController(
     private val _repoImportMode = MutableStateFlow(RepoImportMode.FULL_SOURCE_AND_COMPILE)
     val repoImportMode: StateFlow<RepoImportMode> = _repoImportMode.asStateFlow()
 
-    private val _inAppVaultZips = MutableStateFlow(ExternalRepoBridgeEngine.listInAppVaultZips(workspaceRoot))
+    private val _inAppVaultZips = MutableStateFlow<List<InAppVaultZipEntry>>(emptyList())
     val inAppVaultZips: StateFlow<List<InAppVaultZipEntry>> = _inAppVaultZips.asStateFlow()
+
+    private val _isAcsBuilding = MutableStateFlow(false)
+    val isAcsBuilding: StateFlow<Boolean> = _isAcsBuilding.asStateFlow()
+
+    private val _isCompiling = MutableStateFlow(false)
+    val isCompiling: StateFlow<Boolean> = _isCompiling.asStateFlow()
+
+    private val _activeProject = MutableStateFlow(defaultSandboxDesc)
+    val activeProject: StateFlow<IdeProjectDescriptor> = _activeProject.asStateFlow()
+
+    private val _recentProjects = MutableStateFlow(listOf(defaultSandboxDesc))
+    val recentProjects: StateFlow<List<IdeProjectDescriptor>> = _recentProjects.asStateFlow()
+
+    private val _projectSyncState = MutableStateFlow(ProjectSyncState.IDLE)
+    val projectSyncState: StateFlow<ProjectSyncState> = _projectSyncState.asStateFlow()
+
+    private val _projectSyncMessage = MutableStateFlow("Sandbox Workspace Ready")
+    val projectSyncMessage: StateFlow<String> = _projectSyncMessage.asStateFlow()
+
+    @Volatile
+    private var appContextRef: Context? = null
+    private val safDocUriMap = ConcurrentHashMap<String, String>()
 
     private val _acsBuildLanguage = MutableStateFlow(initialAppDesign.buildLanguage)
     val acsBuildLanguage: StateFlow<AppBuildLanguage> = _acsBuildLanguage.asStateFlow()
@@ -188,20 +219,39 @@ class UnifiedIdeController(
 
     private var savedSnapshotBeforePlay: List<GodotSceneNode>? = null
     private var simulationJob: Job? = null
+    private var typingDebounceJob: Job? = null
+    private var activeBuildJob: Job? = null
     private var scriptTickDivider = 0
+    @Volatile
+    private var godotSessionActive = false
 
     init {
         UnifiedIdeBridge.activeController = this
         seedDefaultFiles(initialNodes)
-        refreshAcsResourceTable()
         godotGroupManager.addToGroup("Player", "player")
         godotGroupManager.addToGroup("GoalGem", "collectibles")
         _gitSnapshots.value = _files.value.associate { it.path to it.content }
         _gitCommits.value = listOf(
             GitCommitRecord("c0001", "Initial VS Code + Godot + ACS workspace", _files.value.size, System.currentTimeMillis())
         )
-        scanExternalReposFoldersSync()
-        runCompileAndTestSync()
+        scope.launch {
+            val (mounted, savedRegistry) = withContext(Dispatchers.IO) {
+                _inAppVaultZips.value = ExternalRepoBridgeEngine.listInAppVaultZips(workspaceRoot)
+                val m = ExternalRepoBridgeEngine.scanExternalReposDirectory(workspaceRoot)
+                val reg = UniversalProjectManager.loadRegistry(workspaceRoot)
+                m to reg
+            }
+            val defaultWithCount = defaultSandboxDesc.copy(fileCount = _files.value.size)
+            _activeProject.value = defaultWithCount
+            _recentProjects.value = mergeProjectList(defaultWithCount, savedRegistry)
+            if (mounted.isNotEmpty()) {
+                applyMountedResults(mounted)
+            }
+            withContext(Dispatchers.Default) {
+                refreshAcsResourceTable()
+                runCompileAndTestSync()
+            }
+        }
     }
 
     private fun seedDefaultFiles(nodes: List<GodotSceneNode>) {
@@ -267,7 +317,10 @@ class UnifiedIdeController(
             |</resources>
         """.trimMargin()
 
+        val projectGodot = GodotProjectWorkspace.defaultProjectGodot(initialAppDesign.appName)
+
         val initialList = listOf(
+            IdeFileEntry("project.godot", "project.godot", projectGodot, "godot-scene"),
             IdeFileEntry("scenes/main.tscn", "main.tscn", PolyglotGodotCompiler.serializeTscn("MainScene", nodes), "tscn"),
             IdeFileEntry("scripts/player_controller.gd", "player_controller.gd", playerGd, "gd", attachedNodeName = "Player"),
             IdeFileEntry("scripts/coin_patrol.py", "coin_patrol.py", gemPy, "py", attachedNodeName = "GoalGem"),
@@ -295,15 +348,55 @@ class UnifiedIdeController(
     }
 
     private fun persistFilesAsync(entries: List<IdeFileEntry>) {
+        if (entries.isEmpty()) return
+        val projectSnapshot = _activeProject.value
         scope.launch(Dispatchers.IO) {
-            entries.forEach { f ->
-                runCatching {
-                    val out = File(ideDir, f.path)
-                    out.parentFile?.mkdirs()
-                    out.writeText(f.content)
+            writeEntriesToActiveStorage(projectSnapshot, entries)
+        }
+    }
+
+    private fun writeEntriesToActiveStorage(project: IdeProjectDescriptor, entries: List<IdeFileEntry>): Int {
+        if (entries.isEmpty()) return 0
+        _projectSyncState.value = ProjectSyncState.SAVING
+        var savedCount = 0
+        var lastError: String? = null
+        entries.forEach { f ->
+            runCatching {
+                val safeRel = UniversalProjectManager.sanitizeRelativePath(f.path)
+                val localRoot = File(project.localDirPath.ifBlank { ideDir.absolutePath }).apply { mkdirs() }
+                UniversalProjectManager.writeLocalFile(localRoot, safeRel, f.content)
+                if (project.isDirectFolder) {
+                    val ctx = appContextRef ?: error("Folder write context unavailable")
+                    UniversalProjectManager.writeSafFile(
+                        context = ctx,
+                        treeUri = Uri.parse(project.safTreeUriString!!),
+                        docUriMap = safDocUriMap,
+                        relPath = safeRel,
+                        content = f.content
+                    )
                 }
+                savedCount++
+            }.onFailure { err ->
+                lastError = err.localizedMessage ?: "Write error"
             }
         }
+        val writtenByPath = entries.associateBy { it.path }
+        _files.value = _files.value.map { cur ->
+            val saved = writtenByPath[cur.path]
+            if (saved != null && cur.content == saved.content && cur.isDirty) cur.copy(isDirty = false) else cur
+        }
+        if (lastError != null) {
+            _projectSyncState.value = ProjectSyncState.ERROR
+            _projectSyncMessage.value = "Write error: $lastError"
+        } else {
+            _projectSyncState.value = ProjectSyncState.SYNCED
+            _projectSyncMessage.value = if (project.isDirectFolder) {
+                "Saved $savedCount file(s) directly to '${project.name}'"
+            } else {
+                "Saved $savedCount file(s) in '${project.name}'"
+            }
+        }
+        return savedCount
     }
 
     fun setWorkspaceMode(mode: IdeWorkspaceMode) {
@@ -359,7 +452,10 @@ class UnifiedIdeController(
     }
 
     fun createOrUpdateFile(path: String, content: String, attachedNodeName: String? = null) {
-        val normalized = path.trim().trimStart('/')
+        val normalized = runCatching { UniversalProjectManager.sanitizeRelativePath(path) }.getOrElse {
+            appendTerminal("[IDE] Invalid path rejected: $path")
+            return
+        }
         val title = normalized.substringAfterLast('/')
         val ext = title.substringAfterLast('.', "txt")
         val existingIdx = _files.value.indexOfFirst { it.path == normalized }
@@ -375,17 +471,47 @@ class UnifiedIdeController(
             newList += IdeFileEntry(normalized, title, content, ext, false, attachedNodeName)
         }
         _files.value = newList
+        updateActiveProjectCount(newList.size)
         openFile(normalized)
-        refreshGitChanges()
-        if (normalized.endsWith(".xml")) refreshAcsResourceTable()
         persistFilesAsync(listOf(newList.first { it.path == normalized }))
+        scope.launch(Dispatchers.Default) {
+            refreshGitChanges()
+            if (normalized.endsWith(".xml")) refreshAcsResourceTable()
+        }
+    }
+
+    private fun batchUpsertFiles(entries: List<IdeFileEntry>, openTargetPath: String? = null) {
+        if (entries.isEmpty()) return
+        val byPath = _files.value.associateBy { it.path }.toMutableMap()
+        entries.forEach { incoming ->
+            val prev = byPath[incoming.path]
+            byPath[incoming.path] = if (prev != null) {
+                prev.copy(
+                    content = incoming.content,
+                    isDirty = false,
+                    attachedNodeName = incoming.attachedNodeName ?: prev.attachedNodeName
+                )
+            } else {
+                incoming
+            }
+        }
+        _files.value = byPath.values.toList()
+        if (!openTargetPath.isNullOrBlank()) {
+            openFile(openTargetPath)
+        }
+        persistFilesAsync(entries)
+        scope.launch(Dispatchers.Default) {
+            refreshGitChanges()
+            refreshAcsResourceTable()
+        }
     }
 
     fun updateActiveFileContent(newContent: String) {
         val active = _activeTabPath.value
         if (active.isBlank()) return
         val prevContent = _files.value.firstOrNull { it.path == active }?.content
-        if (prevContent != null && prevContent != newContent) {
+        if (prevContent == newContent) return
+        if (prevContent != null) {
             val undo = undoStacks.getOrPut(active) { ArrayDeque() }
             if (undo.lastOrNull() != prevContent) {
                 undo.addLast(prevContent)
@@ -393,12 +519,24 @@ class UnifiedIdeController(
             }
             redoStacks[active]?.clear()
         }
-        _files.value = _files.value.map {
+        val updatedList = _files.value.map {
             if (it.path == active) it.copy(content = newContent, isDirty = true) else it
         }
-        refreshGitChanges()
-        if (_editorConfig.value.autoSave) {
-            persistFilesAsync(_files.value.filter { it.path == active })
+        _files.value = updatedList
+        val autoSaveEnabled = _editorConfig.value.autoSave
+        val projectSnapshot = _activeProject.value
+        typingDebounceJob?.cancel()
+        typingDebounceJob = scope.launch {
+            delay(320L)
+            withContext(Dispatchers.Default) { refreshGitChanges() }
+            if (autoSaveEnabled) {
+                val activeEntry = _files.value.firstOrNull { it.path == active }
+                if (activeEntry != null) {
+                    withContext(Dispatchers.IO) {
+                        writeEntriesToActiveStorage(projectSnapshot, listOf(activeEntry))
+                    }
+                }
+            }
         }
     }
 
@@ -510,7 +648,7 @@ class UnifiedIdeController(
         val isXml = target.path.endsWith(".xml")
         val updated = IdeAdvancedModulesEngine.insertAndroidWidget(target.content, isXml, widgetKind, label)
         createOrUpdateFile(target.path, updated)
-        runCompileAndTestSync()
+        runCompileAndTest()
         appendTerminal("[ACS Designer] Inserted $widgetKind('$label') into ${target.title}")
         return target.path
     }
@@ -520,7 +658,7 @@ class UnifiedIdeController(
         val path = "android/app/src/main/res/drawable/ic_${slug.removePrefix("ic_")}.xml"
         val xml = IdeAdvancedModulesEngine.generateVectorDrawableXml(preset, tintHex)
         createOrUpdateFile(path, xml)
-        runCompileAndTestSync()
+        runCompileAndTest()
         appendTerminal("[ACS Asset Studio] Generated vector drawable: $path")
         return path
     }
@@ -586,7 +724,7 @@ class UnifiedIdeController(
             if (it.id == nodeId) it.copy(scriptPath = scriptPath, scriptLanguage = language) else it
         }
         syncTscnFile()
-        runCompileAndTestSync()
+        runCompileAndTest()
         appendTerminal("[Godot -> VS Code] Attached ${language.label} script '$scriptPath' to node '${node.name}'.")
         return _files.value.firstOrNull { it.path == scriptPath }
     }
@@ -710,7 +848,15 @@ class UnifiedIdeController(
 
     fun stepSceneTickSync() {
         if (savedSnapshotBeforePlay == null) savedSnapshotBeforePlay = _sceneNodes.value.toList()
-        runBlocking(Dispatchers.Default) { stepPhysicsAndScripts(forceScripts = false) }
+        _sceneTickCount.value += 1
+        val step = GodotEngineKotlin.PhysicsServer2D.stepWorld(
+            nodes = _sceneNodes.value,
+            tick = _sceneTickCount.value,
+            inputMap = godotInputMap,
+            signalBus = godotSignalBus
+        )
+        _sceneNodes.value = step.updatedNodes
+        _collisionStatus.value = step.collisionStatus
     }
 
     private suspend fun stepPhysicsAndScripts(forceScripts: Boolean = false) {
@@ -779,37 +925,47 @@ class UnifiedIdeController(
 
     fun runCompileAndTest() {
         scope.launch {
-            val diags = withContext(Dispatchers.Default) { runCompileAndTestSync() }
-            val active = _files.value.firstOrNull { it.path == _activeTabPath.value }
-            val isAndroidComposeActivity = active?.content?.contains("class MainActivity") == true ||
-                active?.content?.contains("@Composable") == true
-            val lang = active?.let { f -> ScriptLanguage.entries.firstOrNull { f.path.endsWith(it.extension) } }
-            if (active != null && lang != null && !isAndroidComposeActivity) {
-                val targetNode = active.attachedNodeName ?: "Player"
-                val (comp, _) = PolyglotGodotCompiler.compileForExecution(lang, active.content, targetNode, false, 0.016f, compiler)
-                val bc = comp.bytecode
-                if (bc != null) {
-                    val res = StudioVm(capabilityManager, hostDispatcher).execute(bc)
-                    res.logs.forEach { appendTerminal("[Run:${active.title}] ${it.message}") }
-                    appendLogcat("I/RunTest: ${active.title} executed (${res.instructionsExecuted} ops, ${res.durationMs}ms)")
+            _isCompiling.value = true
+            try {
+                val active = _files.value.firstOrNull { it.path == _activeTabPath.value }
+                val diags = withContext(Dispatchers.Default) { runCompileAndTestSync() }
+                val isAndroidComposeActivity = active?.content?.contains("class MainActivity") == true ||
+                    active?.content?.contains("@Composable") == true
+                val lang = active?.let { f -> ScriptLanguage.entries.firstOrNull { f.path.endsWith(it.extension) } }
+                if (active != null && lang != null && !isAndroidComposeActivity) {
+                    val targetNode = active.attachedNodeName ?: "Player"
+                    val res = withContext(Dispatchers.Default) {
+                        val (comp, _) = PolyglotGodotCompiler.compileForExecution(lang, active.content, targetNode, false, 0.016f, compiler)
+                        comp.bytecode?.let { bc -> StudioVm(capabilityManager, hostDispatcher).execute(bc) }
+                    }
+                    if (res != null) {
+                        res.logs.forEach { appendTerminal("[Run:${active.title}] ${it.message}") }
+                        appendLogcat("I/RunTest: ${active.title} executed (${res.instructionsExecuted} ops, ${res.durationMs}ms)")
+                    }
                 }
+                val errs = diags.count { it.severity == "ERROR" }
+                val summary = "Compile & Test complete: $errs error(s), ${diags.size - errs} notice(s) across project files."
+                _acsLastTestResult.value = summary
+                appendTerminal(summary)
+                appendLogcat("I/ACS-Build: $summary")
+            } finally {
+                _isCompiling.value = false
             }
-            val errs = diags.count { it.severity == "ERROR" }
-            val summary = "Compile & Test complete: $errs error(s), ${diags.size - errs} notice(s) across ${_files.value.size} files."
-            _acsLastTestResult.value = summary
-            appendTerminal(summary)
-            appendLogcat("I/ACS-Build: $summary")
         }
     }
 
     fun runCompileAndTestSync(): List<IdeDiagnostic> {
-        val allDiags = _files.value.flatMap { f ->
+        val activePath = _activeTabPath.value
+        val workspaceFiles = _files.value.filter { f ->
+            !f.path.startsWith("repos/") || f.path == activePath
+        }
+        val allDiags = workspaceFiles.flatMap { f ->
             PolyglotGodotCompiler.analyzeFileDiagnostics(f, compiler)
         }
         _diagnostics.value = allDiags
         val errs = allDiags.count { it.severity == "ERROR" }
         _acsLastTestResult.value = if (errs == 0) {
-            "PASS: All ${_files.value.size} files verified (0 errors)."
+            "PASS: All ${workspaceFiles.size} project files verified (0 errors)."
         } else {
             "FAIL: $errs compile/manifest error(s) detected."
         }
@@ -839,7 +995,7 @@ class UnifiedIdeController(
         val parts = cmd.split(Regex("\\s+"))
         val head = parts.first().lowercase(Locale.US)
         val reply = when (head) {
-            "help" -> "Commands: help | ls | cat <path> | open <path> | repos | bridges | godot play|pause|stop|step|list|export | godot spawn <Type> <Name> | acs test | acs mode | dual mode | stl <code> | voice <msg> | clear"
+            "help" -> "Commands: help | ls | cat <path> | open <path> | repos | bridges | godot version|project|play|pause|stop|step|list|export | godot spawn <Type> <Name> | acs test | acs mode | dual mode | stl <code> | voice <msg> | clear"
             "repos" -> {
                 scanExternalReposFoldersSync()
                 _mountedRepos.value.joinToString("\n") { r ->
@@ -865,6 +1021,11 @@ class UnifiedIdeController(
                 if (match != null && openFile(match.path)) "Opened ${match.path}" else "File not found: $target"
             }
             "godot" -> when (parts.getOrNull(1)?.lowercase(Locale.US)) {
+                "version" -> "Godot 4.7.2.stable (Official Android AAR: Runtime + Editor + AutomationStudioBridge)"
+                "project" -> {
+                    openFile("project.godot")
+                    _files.value.firstOrNull { it.path == "project.godot" }?.content ?: "project.godot ready"
+                }
                 "play" -> { playScene(); "Godot scene playing." }
                 "pause" -> { pauseScene(); "Godot scene paused." }
                 "stop" -> { stopScene(); "Godot scene stopped." }
@@ -877,7 +1038,7 @@ class UnifiedIdeController(
                     val node = spawnSceneNode(t, n, 240f, 140f)
                     "Spawned ${node.type.label} '${node.name}'"
                 }
-                else -> "Godot subcommands: play | pause | stop | step | list | export | spawn <Type> <Name>"
+                else -> "Godot subcommands: version | project | play | pause | stop | step | list | export | spawn <Type> <Name>"
             }
             "acs" -> when (parts.getOrNull(1)?.lowercase(Locale.US)) {
                 "mode" -> { setWorkspaceMode(IdeWorkspaceMode.ANDROID_CODE_STUDIO); "Android Code Studio mode active." }
@@ -993,7 +1154,9 @@ class UnifiedIdeController(
     }
 
     fun refreshInAppVault() {
-        _inAppVaultZips.value = ExternalRepoBridgeEngine.listInAppVaultZips(workspaceRoot)
+        scope.launch(Dispatchers.IO) {
+            _inAppVaultZips.value = ExternalRepoBridgeEngine.listInAppVaultZips(workspaceRoot)
+        }
     }
 
     fun mountRepoFromZipStream(
@@ -1076,8 +1239,7 @@ class UnifiedIdeController(
         appendLogcat("I/Gradle: Build variant switched to ${_acsBuildVariant.value}")
     }
 
-    fun switchAndroidBuildLanguage(lang: AppBuildLanguage, design: AppDesign): String {
-        _acsBuildLanguage.value = lang
+    private fun buildLanguageTargetEntry(lang: AppBuildLanguage, design: AppDesign): Pair<String, String> {
         val targetRelPath = when (lang) {
             AppBuildLanguage.KOTLIN_COMPOSE, AppBuildLanguage.VISUAL_DESIGNER, AppBuildLanguage.JSON_MANIFEST ->
                 "android/app/src/main/java/com/example/studioapp/MainActivity.kt"
@@ -1105,6 +1267,12 @@ class UnifiedIdeController(
             AppBuildLanguage.RUST_JNI -> design.customRustCode
             AppBuildLanguage.CUSTOM_OS_KERNEL -> design.customOsKernelCode
         }
+        return targetRelPath to content
+    }
+
+    fun switchAndroidBuildLanguage(lang: AppBuildLanguage, design: AppDesign): String {
+        _acsBuildLanguage.value = lang
+        val (targetRelPath, content) = buildLanguageTargetEntry(lang, design)
         createOrUpdateFile(targetRelPath, content)
         openFile(targetRelPath)
         _workspaceMode.value = IdeWorkspaceMode.ANDROID_CODE_STUDIO
@@ -1114,48 +1282,97 @@ class UnifiedIdeController(
 
     fun syncAppDesignIntoAndroidIde(design: AppDesign) {
         _acsBuildLanguage.value = design.buildLanguage
-        val updatedDesign = design.copy(buildLanguage = _acsBuildLanguage.value)
-        val genFiles = AndroidProjectGenerator.generateFiles(updatedDesign)
-        genFiles.forEach { gf ->
-            val vPath = "android/${gf.relativePath}"
-            createOrUpdateFile(vPath, gf.content)
+        scope.launch {
+            syncAppDesignIntoAndroidIdeSuspend(design)
         }
-        switchAndroidBuildLanguage(updatedDesign.buildLanguage, updatedDesign)
-        _acsResourceTable.value = AndroidCodeStudioKotlin.ResourceIndexer.indexWorkspace(_files.value)
-        appendTerminal("[Android Code Studio] Synced ${genFiles.size} Gradle/Android project files for '${updatedDesign.appName}'.")
     }
 
-    fun runAndroidStudioGradleBuildPipeline(design: AppDesign): List<String> {
+    private suspend fun syncAppDesignIntoAndroidIdeSuspend(design: AppDesign) {
+        val activeLang = design.buildLanguage
+        val updatedDesign = design.copy(buildLanguage = activeLang)
+        val entries = withContext(Dispatchers.Default) {
+            val genFiles = AndroidProjectGenerator.generateFiles(updatedDesign)
+            val mapped = genFiles.map { gf ->
+                val vPath = "android/${gf.relativePath}"
+                val title = vPath.substringAfterLast('/')
+                val ext = title.substringAfterLast('.', "txt")
+                IdeFileEntry(vPath, title, gf.content, ext, false)
+            }.toMutableList()
+            val (targetRelPath, targetContent) = buildLanguageTargetEntry(activeLang, updatedDesign)
+            val tTitle = targetRelPath.substringAfterLast('/')
+            val tExt = tTitle.substringAfterLast('.', "txt")
+            mapped.removeAll { it.path == targetRelPath }
+            mapped += IdeFileEntry(targetRelPath, tTitle, targetContent, tExt, false)
+            mapped to targetRelPath
+        }
+        batchUpsertFiles(entries.first, openTargetPath = entries.second)
+        appendTerminal("[Android Code Studio] Synced ${entries.first.size} Gradle/Android project files for '${updatedDesign.appName}'.")
+    }
+
+    fun runAndroidStudioGradleBuildPipeline(design: AppDesign): Job {
+        if (_isAcsBuilding.value && activeBuildJob?.isActive == true) {
+            return activeBuildJob!!
+        }
+        val job = scope.launch {
+            executeAndroidGradleBuildPipeline(design)
+        }
+        activeBuildJob = job
+        return job
+    }
+
+    suspend fun executeAndroidGradleBuildPipeline(design: AppDesign): List<String> {
+        _isAcsBuilding.value = true
         val activeLang = _acsBuildLanguage.value
         val variant = _acsBuildVariant.value
         val updatedDesign = design.copy(buildLanguage = activeLang)
-        syncAppDesignIntoAndroidIde(updatedDesign)
-        val diags = runCompileAndTestSync()
-        val resTable = AndroidCodeStudioKotlin.ResourceIndexer.indexWorkspace(_files.value)
-        val errCount = diags.count { it.severity == "ERROR" }
-        val stlDiag = if (activeLang == AppBuildLanguage.STUDIOLANG || activeLang == AppBuildLanguage.CUSTOM_OS_KERNEL) {
-            val code = _files.value.firstOrNull { it.path.endsWith(".stl") }?.content.orEmpty()
-            val c = compiler.compile(code)
-            if (c.success) "Compiled StudioLang bytecode (${c.bytecode?.instructions?.size ?: 0} ops)"
-            else "Compile warning: ${c.diagnostics.firstOrNull()?.message}"
-        } else {
-            "Prepared ${activeLang.label} sources (${activeLang.extension}) for Gradle APK CI"
+        try {
+            _acsBuildPhases.value = listOf(
+                "[1/5 Gradle Sync] Generating Gradle project files (${updatedDesign.packageId})...",
+                "[2/5 AAPT2 Index] Pending...",
+                "[3/5 Multi-Lang Build] Pending...",
+                "[4/5 Manifest & Lint] Pending...",
+                "[5/5 Package Ready] Running in background..."
+            )
+            _acsLastTestResult.value = "Gradle building ($variant · ${activeLang.label})..."
+
+            syncAppDesignIntoAndroidIdeSuspend(updatedDesign)
+
+            val result = withContext(Dispatchers.Default) {
+                val filesSnapshot = _files.value
+                val resTable = AndroidCodeStudioKotlin.ResourceIndexer.indexWorkspace(filesSnapshot)
+                _acsResourceTable.value = resTable
+                val diags = runCompileAndTestSync()
+                val errCount = diags.count { it.severity == "ERROR" }
+                val stlDiag = if (activeLang == AppBuildLanguage.STUDIOLANG || activeLang == AppBuildLanguage.CUSTOM_OS_KERNEL) {
+                    val code = filesSnapshot.firstOrNull { it.path.endsWith(".stl") }?.content.orEmpty()
+                    val c = compiler.compile(code)
+                    if (c.success) "Compiled StudioLang bytecode (${c.bytecode?.instructions?.size ?: 0} ops)"
+                    else "Compile warning: ${c.diagnostics.firstOrNull()?.message}"
+                } else {
+                    "Prepared ${activeLang.label} sources (${activeLang.extension}) for Gradle APK CI"
+                }
+                val phases = listOf(
+                    "[1/5 Gradle Sync] ${updatedDesign.packageId} · variant=$variant · minSdk=${updatedDesign.minSdk} targetSdk=${updatedDesign.targetSdk}",
+                    "[2/5 AAPT2 Index] Indexed ${resTable.totalSymbols} R.* symbols (${resTable.strings.size} strings, ${resTable.layouts.size} layouts)",
+                    "[3/5 Multi-Lang Build] $stlDiag",
+                    "[4/5 Manifest & Lint] Checked AndroidManifest & Play Policy ($errCount error(s))",
+                    "[5/5 Package Ready] ${if (errCount == 0) "PASS — Ready to Export Gradle/APK ZIP" else "FAIL — Fix $errCount error(s)"}"
+                )
+                phases to errCount
+            }
+
+            val (phases, errCount) = result
+            _acsBuildPhases.value = phases
+            phases.forEach { appendTerminal(it); appendLogcat("I/ACSBuild: $it") }
+            _acsLastTestResult.value = if (errCount == 0) {
+                "Android Studio Build PASS ($variant · ${activeLang.label})"
+            } else {
+                "Build blocked: $errCount error(s)"
+            }
+            return phases
+        } finally {
+            _isAcsBuilding.value = false
         }
-        val phases = listOf(
-            "[1/5 Gradle Sync] ${updatedDesign.packageId} · variant=$variant · minSdk=${updatedDesign.minSdk} targetSdk=${updatedDesign.targetSdk}",
-            "[2/5 AAPT2 Index] Indexed ${resTable.totalSymbols} R.* symbols (${resTable.strings.size} strings, ${resTable.layouts.size} layouts)",
-            "[3/5 Multi-Lang Build] $stlDiag",
-            "[4/5 Manifest & Lint] Checked AndroidManifest & Play Policy ($errCount error(s))",
-            "[5/5 Package Ready] ${if (errCount == 0) "PASS — Ready to Export Gradle/APK ZIP" else "FAIL — Fix $errCount error(s)"}"
-        )
-        _acsBuildPhases.value = phases
-        phases.forEach { appendTerminal(it); appendLogcat("I/ACSBuild: $it") }
-        _acsLastTestResult.value = if (errCount == 0) {
-            "Android Studio Build PASS ($variant · ${activeLang.label})"
-        } else {
-            "Build blocked: $errCount error(s)"
-        }
-        return phases
     }
 
     fun mountRepoFromZipStreamSync(
@@ -1260,11 +1477,11 @@ class UnifiedIdeController(
 
     fun runBridgeWorkflow(bridgeId: String) {
         scope.launch {
-            runBridgeWorkflowSync(bridgeId)
+            executeBridgeWorkflow(bridgeId)
         }
     }
 
-    fun runBridgeWorkflowSync(bridgeId: String): String = runBlocking(Dispatchers.Default) {
+    suspend fun executeBridgeWorkflow(bridgeId: String): String = withContext(Dispatchers.Default) {
         val outcome = when (bridgeId) {
             "bridge_vscode_to_godot" -> {
                 val target = _sceneNodes.value.firstOrNull { it.name == "Player" } ?: _sceneNodes.value.firstOrNull()
@@ -1290,7 +1507,7 @@ class UnifiedIdeController(
                 }
             }
             "bridge_godot_servers_vm" -> {
-                stepSceneTick()
+                stepSceneTickSync()
                 val tscn = PolyglotGodotCompiler.serializeTscn("MainScene", _sceneNodes.value)
                 "PASS (${_sceneNodes.value.size} nodes stepped, ${tscn.length} bytes .tscn synced)"
             }
@@ -1310,6 +1527,370 @@ class UnifiedIdeController(
         appendTerminal("[Bridge:$bridgeId] $outcome")
         appendLogcat("I/RepoBridge: [$bridgeId] $outcome")
         outcome
+    }
+
+    fun syncGodot47ProjectToDisk(context: Context): GodotProjectWorkspace.SyncResult {
+        syncTscnFile()
+        val result = GodotProjectWorkspace.syncIdeToGodotProject(
+            context = context,
+            files = _files.value,
+            sceneNodes = _sceneNodes.value
+        )
+        godotSessionActive = true
+        val msg = "[Godot 4.7.2] Synced ${result.writtenFilesCount} workspace file(s) -> ${result.projectDir.name}"
+        appendTerminal(msg)
+        appendLogcat("I/Godot47Workspace: $msg")
+        return result
+    }
+
+    fun syncFromGodot47Disk(context: Context, onlyIfSessionWasActive: Boolean = false): Int {
+        if (onlyIfSessionWasActive && !godotSessionActive) return 0
+        if (onlyIfSessionWasActive) godotSessionActive = false
+        val projectDir = GodotProjectWorkspace.activeProjectDir(context)
+        val diskEntries = GodotProjectWorkspace.importGodotProjectToIde(projectDir)
+        if (diskEntries.isEmpty()) return 0
+
+        val currentByPath = _files.value.associateBy { it.path }.toMutableMap()
+        val updatedEntries = mutableListOf<IdeFileEntry>()
+        diskEntries.forEach { disk ->
+            val existing = currentByPath[disk.path]
+            if (existing == null || existing.content != disk.content) {
+                val nextEntry = if (existing != null) {
+                    existing.copy(content = disk.content, isDirty = false)
+                } else {
+                    disk
+                }
+                currentByPath[disk.path] = nextEntry
+                updatedEntries += nextEntry
+            }
+        }
+        if (updatedEntries.isNotEmpty()) {
+            _files.value = currentByPath.values.toList()
+            persistFilesAsync(updatedEntries)
+            refreshGitChanges()
+            val msg = "[Godot 4.7.2] Synced ${updatedEntries.size} updated file(s) back from Godot disk workspace."
+            appendTerminal(msg)
+            appendLogcat("I/Godot47Workspace: $msg")
+        }
+        return updatedEntries.size
+    }
+
+    // ---- UNIVERSAL MULTI-PROJECT WORKSPACE OPERATIONS ----
+
+    fun attachAppContext(context: Context) {
+        appContextRef = context.applicationContext
+    }
+
+    private fun mergeProjectList(
+        primary: IdeProjectDescriptor,
+        existing: List<IdeProjectDescriptor>
+    ): List<IdeProjectDescriptor> {
+        val map = linkedMapOf<String, IdeProjectDescriptor>()
+        map[primary.id] = primary
+        existing.forEach { item ->
+            if (item.id !in map) map[item.id] = item
+        }
+        if (defaultSandboxDesc.id !in map) {
+            map[defaultSandboxDesc.id] = defaultSandboxDesc
+        }
+        return map.values.sortedWith(
+            compareByDescending<IdeProjectDescriptor> { it.id == primary.id }
+                .thenByDescending { it.lastOpenedMs }
+        )
+    }
+
+    private fun updateActiveProjectCount(fileCount: Int) {
+        val updated = _activeProject.value.copy(fileCount = fileCount, lastOpenedMs = System.currentTimeMillis())
+        _activeProject.value = updated
+        val nextList = mergeProjectList(updated, _recentProjects.value)
+        _recentProjects.value = nextList
+        scope.launch(Dispatchers.IO) {
+            UniversalProjectManager.saveRegistry(workspaceRoot, nextList)
+        }
+    }
+
+    private fun applyLoadedProjectWorkspace(loaded: LoadedProjectWorkspace) {
+        safDocUriMap.clear()
+        safDocUriMap.putAll(loaded.safDocUriByRelPath)
+        _activeProject.value = loaded.descriptor
+        _files.value = loaded.files
+        val preferredEntry = loaded.files.firstOrNull { f ->
+            f.path == "project.godot" ||
+                f.path.endsWith("MainActivity.kt") ||
+                f.path.endsWith("main.py") ||
+                f.path.endsWith("main.cpp") ||
+                f.path.endsWith("index.html") ||
+                f.path.endsWith("main.stl") ||
+                f.path.endsWith(".gd")
+        } ?: loaded.files.firstOrNull()
+        _openTabs.value = listOfNotNull(preferredEntry?.path)
+        _activeTabPath.value = preferredEntry?.path.orEmpty()
+        _gitSnapshots.value = loaded.files.associate { it.path to it.content }
+        _gitChanges.value = emptyList()
+        _gitCommits.value = listOf(
+            GitCommitRecord("c0001", "Opened ${loaded.descriptor.name}", loaded.files.size, System.currentTimeMillis())
+        )
+        _recentProjects.value = mergeProjectList(loaded.descriptor, _recentProjects.value)
+        scope.launch(Dispatchers.IO) {
+            UniversalProjectManager.saveRegistry(workspaceRoot, _recentProjects.value)
+        }
+        scope.launch(Dispatchers.Default) {
+            refreshAcsResourceTable()
+            runCompileAndTestSync()
+        }
+        _projectSyncState.value = ProjectSyncState.SYNCED
+        _projectSyncMessage.value = loaded.summaryMessage
+        appendTerminal("[Project] ${loaded.summaryMessage}")
+        appendLogcat("I/ProjectManager: ${loaded.summaryMessage}")
+    }
+
+    fun saveAllDirtyFiles(onResult: (String) -> Unit = {}) {
+        val projectSnapshot = _activeProject.value
+        val toSave = _files.value.filter { it.isDirty || it.path == _activeTabPath.value }
+        scope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                writeEntriesToActiveStorage(projectSnapshot, toSave)
+            }
+            val msg = if (_projectSyncState.value == ProjectSyncState.ERROR) {
+                _projectSyncMessage.value
+            } else {
+                "Saved $saved file(s) to '${projectSnapshot.name}'."
+            }
+            appendTerminal("[Save] $msg")
+            onResult(msg)
+        }
+    }
+
+    fun deleteFileFromActiveProject(relPath: String, onResult: (String) -> Unit = {}) {
+        val clean = runCatching { UniversalProjectManager.sanitizeRelativePath(relPath) }.getOrNull() ?: return
+        val proj = _activeProject.value
+        _files.value = _files.value.filterNot { it.path == clean }
+        closeTab(clean)
+        updateActiveProjectCount(_files.value.size)
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { UniversalProjectManager.deleteLocalFile(File(proj.localDirPath), clean) }
+                if (proj.isDirectFolder) {
+                    appContextRef?.let { ctx -> UniversalProjectManager.deleteSafFile(ctx, safDocUriMap, clean) }
+                }
+            }
+            refreshGitChanges()
+            val msg = "Deleted '$clean' from '${proj.name}'."
+            _projectSyncMessage.value = msg
+            appendTerminal("[Project] $msg")
+            onResult(msg)
+        }
+    }
+
+    fun openSafFolderProject(context: Context, treeUri: Uri, onComplete: (String) -> Unit = {}) {
+        attachAppContext(context)
+        _projectSyncState.value = ProjectSyncState.SCANNING
+        _projectSyncMessage.value = "Scanning selected device folder..."
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    UniversalProjectManager.scanSafTree(context.applicationContext, workspaceRoot, treeUri)
+                }
+            }.onSuccess { loaded ->
+                applyLoadedProjectWorkspace(loaded)
+                onComplete(loaded.summaryMessage)
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "Folder open failed: ${err.localizedMessage ?: "Permission denied"}"
+                _projectSyncState.value = ProjectSyncState.ERROR
+                _projectSyncMessage.value = msg
+                appendTerminal("[Project] $msg")
+                onComplete(msg)
+            }
+        }
+    }
+
+    fun importZipProject(context: Context, zipUri: Uri, onComplete: (String) -> Unit = {}) {
+        attachAppContext(context)
+        _projectSyncState.value = ProjectSyncState.SCANNING
+        _projectSyncMessage.value = "Extracting ZIP project archive..."
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val zipName = UniversalProjectManager.queryDocumentFileName(context, zipUri)
+                    val stream = context.contentResolver.openInputStream(zipUri)
+                        ?: error("Could not read selected ZIP file")
+                    stream.use { input ->
+                        UniversalProjectManager.importAnyZipStream(workspaceRoot, zipName, input)
+                    }
+                }
+            }.onSuccess { loaded ->
+                applyLoadedProjectWorkspace(loaded)
+                onComplete(loaded.summaryMessage)
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "ZIP import failed: ${err.localizedMessage ?: "Invalid archive"}"
+                _projectSyncState.value = ProjectSyncState.ERROR
+                _projectSyncMessage.value = msg
+                appendTerminal("[Project] $msg")
+                onComplete(msg)
+            }
+        }
+    }
+
+    fun cloneGithubProject(rawUrl: String, branchOverride: String? = null, onComplete: (String) -> Unit = {}) {
+        _projectSyncState.value = ProjectSyncState.SCANNING
+        _projectSyncMessage.value = "Downloading GitHub repository..."
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    UniversalProjectManager.cloneGithubRepoZip(workspaceRoot, rawUrl, branchOverride)
+                }
+            }.onSuccess { loaded ->
+                applyLoadedProjectWorkspace(loaded)
+                onComplete(loaded.summaryMessage)
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "GitHub clone failed: ${err.localizedMessage ?: "Network error"}"
+                _projectSyncState.value = ProjectSyncState.ERROR
+                _projectSyncMessage.value = msg
+                appendTerminal("[Project] $msg")
+                onComplete(msg)
+            }
+        }
+    }
+
+    fun createNewInAppProject(name: String, template: ProjectTemplateKind, onComplete: (String) -> Unit = {}) {
+        _projectSyncState.value = ProjectSyncState.SCANNING
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    UniversalProjectManager.createNewInAppProject(workspaceRoot, name, template)
+                }
+            }.onSuccess { loaded ->
+                applyLoadedProjectWorkspace(loaded)
+                onComplete(loaded.summaryMessage)
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "Project creation failed: ${err.localizedMessage ?: "Error"}"
+                _projectSyncState.value = ProjectSyncState.ERROR
+                _projectSyncMessage.value = msg
+                onComplete(msg)
+            }
+        }
+    }
+
+    fun switchToProject(context: Context, descriptor: IdeProjectDescriptor, onComplete: (String) -> Unit = {}) {
+        attachAppContext(context)
+        if (descriptor.id == UniversalProjectManager.DEFAULT_PROJECT_ID) {
+            safDocUriMap.clear()
+            seedDefaultFiles(initialNodes)
+            val sandbox = defaultSandboxDesc.copy(fileCount = _files.value.size, lastOpenedMs = System.currentTimeMillis())
+            _activeProject.value = sandbox
+            _gitSnapshots.value = _files.value.associate { it.path to it.content }
+            _gitChanges.value = emptyList()
+            _recentProjects.value = mergeProjectList(sandbox, _recentProjects.value)
+            scope.launch(Dispatchers.IO) {
+                UniversalProjectManager.saveRegistry(workspaceRoot, _recentProjects.value)
+                val mounted = ExternalRepoBridgeEngine.scanExternalReposDirectory(workspaceRoot)
+                if (mounted.isNotEmpty()) applyMountedResults(mounted)
+            }
+            scope.launch(Dispatchers.Default) {
+                refreshAcsResourceTable()
+                runCompileAndTestSync()
+            }
+            val msg = "Switched to Automation Sandbox (${_files.value.size} files)."
+            _projectSyncState.value = ProjectSyncState.SYNCED
+            _projectSyncMessage.value = msg
+            appendTerminal("[Project] $msg")
+            onComplete(msg)
+            return
+        }
+
+        if (descriptor.isDirectFolder && !descriptor.safTreeUriString.isNullOrBlank()) {
+            openSafFolderProject(context, Uri.parse(descriptor.safTreeUriString), onComplete)
+            return
+        }
+
+        _projectSyncState.value = ProjectSyncState.SCANNING
+        scope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                UniversalProjectManager.loadLocalProjectDir(descriptor)
+            }
+            applyLoadedProjectWorkspace(loaded)
+            onComplete(loaded.summaryMessage)
+        }
+    }
+
+    fun removeProject(descriptor: IdeProjectDescriptor) {
+        if (descriptor.id == UniversalProjectManager.DEFAULT_PROJECT_ID) return
+        val filtered = _recentProjects.value.filterNot { it.id == descriptor.id }
+        _recentProjects.value = filtered
+        scope.launch(Dispatchers.IO) {
+            UniversalProjectManager.saveRegistry(workspaceRoot, filtered)
+            if (descriptor.localDirPath.isNotBlank() && descriptor.localDirPath != ideDir.absolutePath) {
+                runCatching { File(descriptor.localDirPath).deleteRecursively() }
+            }
+        }
+        if (_activeProject.value.id == descriptor.id) {
+            appContextRef?.let { switchToProject(it, defaultSandboxDesc) }
+        }
+    }
+
+    fun exportProjectZipToUri(
+        context: Context,
+        project: IdeProjectDescriptor,
+        destUri: Uri,
+        onComplete: (String) -> Unit = {}
+    ) {
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val exportFiles = if (project.id == _activeProject.value.id) {
+                        _files.value
+                    } else if (project.isDirectFolder && !project.safTreeUriString.isNullOrBlank()) {
+                        UniversalProjectManager.scanSafTree(
+                            context.applicationContext,
+                            workspaceRoot,
+                            Uri.parse(project.safTreeUriString)
+                        ).files
+                    } else {
+                        UniversalProjectManager.loadLocalProjectDir(project).files
+                    }
+                    val tmpZip = File(workspaceRoot, "exports/${project.id}_export.zip")
+                    UniversalProjectManager.exportProjectToZip(project, exportFiles, tmpZip)
+                    context.contentResolver.openOutputStream(destUri)?.use { out ->
+                        tmpZip.inputStream().use { it.copyTo(out) }
+                    } ?: error("Could not open destination file")
+                    tmpZip.length()
+                }
+            }.onSuccess { bytes ->
+                val msg = "Exported '${project.name}' ZIP (${bytes / 1024} KB)."
+                appendTerminal("[Export] $msg")
+                onComplete(msg)
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "Export failed: ${err.localizedMessage ?: "Write error"}"
+                appendTerminal("[Export] $msg")
+                onComplete(msg)
+            }
+        }
+    }
+
+    fun exportGodot47ProjectZip(context: Context): File {
+        val sync = syncGodot47ProjectToDisk(context)
+        val outZip = File(workspaceRoot, "exports/godot_47_project.zip")
+        GodotProjectWorkspace.exportGodotProjectZip(sync.projectDir, outZip)
+        val msg = "[Godot 4.7.2] Exported Godot project ZIP (${outZip.length() / 1024} KB) -> ${outZip.name}"
+        appendTerminal(msg)
+        appendLogcat("I/Godot47Export: $msg")
+        return outZip
+    }
+
+    fun recordGodotBridgeEvent(type: String, name: String, payload: String) {
+        val formatted = "[Godot 4.7.2 Bridge/$type] $name: $payload"
+        _godotSignalsLog.value = (listOf(formatted) + _godotSignalsLog.value).take(30)
+        appendTerminal(formatted)
+        appendLogcat("I/GodotBridge: $formatted")
+        StudioTriggerBus.pushEvent("godot.$type", "Godot 4.7.2 Bridge", "$name: $payload")
+        if (type == "studiolang" && payload.isNotBlank()) {
+            runInlineStudioLang(payload)
+        }
     }
 
     private fun appendTerminal(line: String) {
@@ -1392,10 +1973,10 @@ class UnifiedIdeController(
             ),
             IdeExtensionPack(
                 id = "godotengine.polyglot-2d",
-                name = "Godot 2D Scene & Polyglot Bridge",
+                name = "Godot 4.7.2.stable Engine & Polyglot Bridge",
                 publisher = "Godot Ecosystem (MIT)",
-                description = "Attach any language (GDScript, Python, StudioLang, Kotlin, Java, JS, C++) directly to Godot nodes.",
-                version = "4.3.0"
+                description = "Official Godot 4.7.2.stable Runtime/Editor + GDScript, Python, StudioLang, Kotlin, Java, JS, C++ bridge.",
+                version = "4.7.2"
             ),
             IdeExtensionPack(
                 id = "androidcs.compose-preview",

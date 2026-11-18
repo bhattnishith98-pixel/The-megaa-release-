@@ -36,16 +36,22 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
 import com.example.R
 import com.example.StudioViewModel
 import com.example.bridge.TermuxToolchainBridge
 import com.example.docs.ExamplesLibrary
 import com.example.lang.StudioCapability
 import com.example.macros.MacroRecord
+import com.example.runtime.GodotEditorActivity
+import com.example.runtime.GodotRuntimeActivity
+import com.example.runtime.NativeRuntimeBridge
 import com.example.services.ScreenCaptureService
 import com.example.services.StudioAccessibilityService
 import com.example.ui.theme.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun StudioDashboardScreen(
@@ -515,18 +521,19 @@ fun StudioDashboardScreen(
 
             "Security" -> {
                 item {
+                    val idReport by vm.identityReportState.collectAsStateWithLifecycle()
                     Card(
                         colors = CardDefaults.cardColors(containerColor = SlateCard),
                         modifier = Modifier.fillMaxWidth().border(1.dp, SlateBorder, RoundedCornerShape(14.dp))
                     ) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Exclusive Runtime Identity", style = MaterialTheme.typography.titleMedium, color = CyberCyan)
-                            Text("Package: ${vm.identityReport.packageName}", style = MaterialTheme.typography.labelSmall, color = TextPrimary)
-                            Text("Cert SHA-256: ${vm.identityReport.signingSha256.take(28)}...", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                            Text("Package: ${idReport.packageName}", style = MaterialTheme.typography.labelSmall, color = TextPrimary)
+                            Text("Cert SHA-256: ${idReport.signingSha256.take(28)}...", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                             Text(
-                                "Session Valid: ${vm.identityReport.isExclusiveSessionValid}",
+                                "Session Valid: ${idReport.isExclusiveSessionValid}",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (vm.identityReport.isExclusiveSessionValid) EmeraldRun else RoseError
+                                color = if (idReport.isExclusiveSessionValid) EmeraldRun else RoseError
                             )
                         }
                     }
@@ -586,6 +593,83 @@ fun StudioDashboardScreen(
                             Text("Shizuku Installed: ${privStatus.shizukuInstalled} (rish binary: ${privStatus.shizukuRishPresent})", style = MaterialTheme.typography.labelSmall, color = if (privStatus.shizukuInstalled) EmeraldRun else TextPrimary)
                             Text("Root `su`: ${privStatus.rootBinaryPath ?: "Not detected"}", style = MaterialTheme.typography.labelSmall, color = if (privStatus.rootAvailable) EmeraldRun else TextPrimary)
                             Text(privStatus.notes, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                        }
+                    }
+                }
+                item {
+                    val nativeInfo = remember { NativeRuntimeBridge.buildInfo() }
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SlateCard),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                            .testTag("godot_47_runtime_card")
+                    ) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Godot 4.7.2.stable & Native C++20 Runtime", style = MaterialTheme.typography.titleMedium, color = CyberCyan)
+                            Text(
+                                "Engine: Godot 4.7.2.stable (${if (BuildConfig.GODOT_EDITOR_BUILD) "Editor + Runtime" else "Runtime Only"})",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = EmeraldRun
+                            )
+                            Text("NDK Bridge: $nativeInfo", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item {
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                val sync = withContext(Dispatchers.IO) { vm.unifiedIde.syncGodot47ProjectToDisk(context) }
+                                                context.startActivity(
+                                                    GodotRuntimeActivity.createIntent(
+                                                        context = context,
+                                                        projectPath = sync.projectDir.absolutePath,
+                                                        mainScene = sync.mainSceneResPath
+                                                    )
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.defaultMinSize(minHeight = 48.dp).testTag("dashboard_godot_run_btn"),
+                                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
+                                    ) { Text("Run Live Project") }
+                                }
+                                if (BuildConfig.GODOT_EDITOR_BUILD) {
+                                    item {
+                                        OutlinedButton(
+                                            onClick = {
+                                                scope.launch {
+                                                    val sync = withContext(Dispatchers.IO) { vm.unifiedIde.syncGodot47ProjectToDisk(context) }
+                                                    context.startActivity(
+                                                        GodotEditorActivity.createIntent(
+                                                            context = context,
+                                                            projectPath = sync.projectDir.absolutePath
+                                                        )
+                                                    )
+                                                }
+                                            },
+                                            modifier = Modifier.defaultMinSize(minHeight = 48.dp).testTag("dashboard_godot_editor_btn")
+                                        ) { Text("Godot 4.7 Editor") }
+                                    }
+                                    item {
+                                        OutlinedButton(
+                                            onClick = {
+                                                context.startActivity(
+                                                    GodotEditorActivity.createIntent(
+                                                        context = context,
+                                                        openProjectManager = true
+                                                    )
+                                                )
+                                            },
+                                            modifier = Modifier.defaultMinSize(minHeight = 48.dp).testTag("dashboard_godot_pm_btn")
+                                        ) { Text("Project Manager") }
+                                    }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = { context.startActivity(GodotRuntimeActivity.createIntent(context)) },
+                                        modifier = Modifier.defaultMinSize(minHeight = 48.dp).testTag("dashboard_godot_3d_btn")
+                                    ) { Text("Godot 3D") }
+                                }
+                            }
                         }
                     }
                 }

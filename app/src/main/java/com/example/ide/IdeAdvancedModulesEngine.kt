@@ -25,7 +25,8 @@ data class IdeEditorConfig(
     val fontSizeSp: Int = 12,
     val wordWrap: Boolean = true,
     val tabSpaces: Int = 4,
-    val autoSave: Boolean = true
+    val autoSave: Boolean = true,
+    val useSoraAar: Boolean = true
 )
 
 object IdeAdvancedModulesEngine {

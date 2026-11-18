@@ -34,8 +34,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.monetization.MonetizationManager
+import com.example.runtime.GodotBridgeReceiver
 import com.example.services.StudioDeviceTriggerReceiver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.example.ui.screens.*
 import com.example.ui.theme.*
 
@@ -125,12 +128,23 @@ fun AutomationStudioRoot(vm: StudioViewModel) {
     }
 
     DisposableEffect(lifecycleOwner, vm) {
-        val triggerReceiver = runCatching { StudioDeviceTriggerReceiver.register(context.applicationContext) }.getOrNull()
+        val appCtx = context.applicationContext
+        val triggerReceiver = runCatching { StudioDeviceTriggerReceiver.register(appCtx) }.getOrNull()
+        val godotBridgeReceiver = runCatching {
+            GodotBridgeReceiver.register(appCtx) { type, name, payload ->
+                vm.unifiedIde.recordGodotBridgeEvent(type, name, payload)
+            }
+        }.getOrNull()
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
                     vm.monetization.onForegroundChanged(true)
                     vm.refreshAndroidTweaks()
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        scope.launch(Dispatchers.IO) {
+                            runCatching { vm.unifiedIde.syncFromGodot47Disk(appCtx, onlyIfSessionWasActive = true) }
+                        }
+                    }
                 }
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> vm.monetization.onForegroundChanged(false)
                 else -> Unit
@@ -138,7 +152,8 @@ fun AutomationStudioRoot(vm: StudioViewModel) {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            triggerReceiver?.let { runCatching { context.applicationContext.unregisterReceiver(it) } }
+            triggerReceiver?.let { runCatching { appCtx.unregisterReceiver(it) } }
+            godotBridgeReceiver?.let { runCatching { appCtx.unregisterReceiver(it) } }
             vm.monetization.onForegroundChanged(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
@@ -217,7 +232,10 @@ fun AutomationStudioRoot(vm: StudioViewModel) {
                             onOpenDocs = { navigateTo(StudioDestination.DOCS) },
                             onOpenIde = { navigateTo(StudioDestination.IDE) }
                         )
-                        StudioDestination.IDE -> UnifiedIdeScreen(vm = vm)
+                        StudioDestination.IDE -> UnifiedIdeScreen(
+                            vm = vm,
+                            onOpenAgentConfig = { navigateTo(StudioDestination.AGENT) }
+                        )
                         StudioDestination.NODES -> NodeAndCodeStudioScreen(vm = vm)
                         StudioDestination.AGENT -> AgentBriefingScreen(vm = vm)
                         StudioDestination.APPS -> AppBuilderScreen(

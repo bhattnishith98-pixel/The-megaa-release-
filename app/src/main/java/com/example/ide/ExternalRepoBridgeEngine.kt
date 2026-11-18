@@ -42,9 +42,9 @@ enum class UpstreamRepoKind(
     ),
     GODOT(
         id = "godot",
-        displayName = "Godot Engine",
+        displayName = "Godot Engine 4.7.2-stable",
         repoSlug = "godotengine/godot",
-        repoUrl = "https://github.com/godotengine/godot",
+        repoUrl = "https://github.com/godotengine/godot/releases/tag/4.7.2-stable",
         license = "MIT License",
         expectedLayers = listOf(
             "core",
@@ -54,8 +54,8 @@ enum class UpstreamRepoKind(
             "editor"
         ),
         folderHint = "external_repos/godot",
-        archiveFileName = "godot-master.zip",
-        archiveDownloadUrl = "https://github.com/godotengine/godot/archive/refs/heads/master.zip"
+        archiveFileName = "godot-4.7.2-stable.zip",
+        archiveDownloadUrl = "https://github.com/godotengine/godot/archive/refs/tags/4.7.2-stable.zip"
     ),
     ANDROID_CODE_STUDIO(
         id = "android-code-studio",
@@ -370,10 +370,10 @@ object ExternalRepoBridgeEngine {
                 "vscode-main/src/vs/base/common/strings.ts" to "export function trim(s: string): string { return s.trim(); }"
             )
             UpstreamRepoKind.GODOT -> listOf(
-                "godot-master/SConstruct" to "env = Environment()\n# Godot Engine 4.x Clean-Room SCons Manifest",
-                "godot-master/core/object/object.h" to "#pragma once\nclass Object { public: virtual void emit_signal(const char* name); };",
-                "godot-master/scene/2d/node_2d.h" to "#pragma once\nclass Node2D : public Object { public: float x = 0; float y = 0; };",
-                "godot-master/modules/gdscript/gdscript_vm.cpp" to "// GDScript VM EntryPoint bridged to GodotEngineKotlin & StudioVm\nvoid gd_step(float delta) {}"
+                "godot-4.7.2-stable/SConstruct" to "env = Environment()\n# Godot Engine 4.7.2-stable SCons Manifest (https://github.com/godotengine/godot/releases/tag/4.7.2-stable)",
+                "godot-4.7.2-stable/core/object/object.h" to "#pragma once\nclass Object { public: virtual void emit_signal(const char* name); };",
+                "godot-4.7.2-stable/scene/2d/node_2d.h" to "#pragma once\nclass Node2D : public Object { public: float x = 0; float y = 0; };",
+                "godot-4.7.2-stable/modules/gdscript/gdscript_vm.cpp" to "// Godot 4.7.2-stable GDScript VM EntryPoint bridged to GodotEngineKotlin & StudioVm\nvoid gd_step(float delta) {}"
             )
             UpstreamRepoKind.ANDROID_CODE_STUDIO -> listOf(
                 "android-code-studio-main/settings.gradle.kts" to "include(\":app\", \":xml-inflater\", \":java-completion\", \":build-tools\")",
@@ -481,6 +481,8 @@ object ExternalRepoBridgeEngine {
         return if (
             first.endsWith("-main") ||
             first.endsWith("-master") ||
+            first.endsWith("-stable") ||
+            first.startsWith("godot-4.") ||
             first == "vscode" ||
             first == "godot" ||
             first == "android-code-studio"

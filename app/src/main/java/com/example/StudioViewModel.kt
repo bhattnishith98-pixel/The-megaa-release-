@@ -118,11 +118,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     )
 
-    val identityReport: RuntimeIdentityReport = RuntimeIdentity.verifyAppIdentity(appContext)
-
-    init {
-        unifiedIde.scanBundledAssetArchives { assetPath -> appContext.assets.open(assetPath) }
-    }
+    private val _identityReport = MutableStateFlow(
+        RuntimeIdentityReport(
+            packageName = appContext.packageName,
+            expectedPackageName = "com.aistudio.automationstudio.xqvmkp",
+            signingSha256 = "Verifying...",
+            isExclusiveSessionValid = true
+        )
+    )
+    val identityReportState: StateFlow<RuntimeIdentityReport> = _identityReport.asStateFlow()
+    val identityReport: RuntimeIdentityReport get() = _identityReport.value
 
     private val _binaryTarget = MutableStateFlow(BinaryTarget.STUDIO_VM_BIN)
     val binaryTarget: StateFlow<BinaryTarget> = _binaryTarget.asStateFlow()
@@ -136,7 +141,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _aiTestResult = MutableStateFlow<String?>(null)
     val aiTestResult: StateFlow<String?> = _aiTestResult.asStateFlow()
 
-    private val _androidTweaks = MutableStateFlow(AndroidCustomizer.readDeviceTweaks(appContext))
+    private val _androidTweaks = MutableStateFlow(
+        DeviceTweaksSnapshot(
+            brightness = 128,
+            screenTimeoutMs = 30_000,
+            mediaVolume = 0,
+            maxMediaVolume = 15,
+            ringVolume = 0,
+            canWriteSettings = false,
+            canDrawOverlays = false,
+            fontScale = 1.0f
+        )
+    )
     val androidTweaks: StateFlow<DeviceTweaksSnapshot> = _androidTweaks.asStateFlow()
 
     private val _installedApps = MutableStateFlow<List<InstalledAppSummary>>(emptyList())
@@ -289,10 +305,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             _compileOutput.value = compiled
         }
         viewModelScope.launch(Dispatchers.IO) {
+            _identityReport.value = RuntimeIdentity.verifyAppIdentity(appContext)
+            _androidTweaks.value = AndroidCustomizer.readDeviceTweaks(appContext)
             saveActiveWorkspaceFiles()
             File(workspaceDir, "monetization_profile.json").delete()
-            refreshWorkspaceFiles()
+            refreshWorkspaceFilesSuspend()
         }
+        unifiedIde.scanBundledAssetArchives { assetPath -> appContext.assets.open(assetPath) }
         refreshAvailableLibraries()
         refreshInstalledApps()
     }
@@ -384,8 +403,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectBinaryTarget(target: BinaryTarget) {
         _binaryTarget.value = target
-        _compileOutput.value = compiler.compile(_sourceCode.value, useCache = false, target = target)
-        setBanner("Binary target switched to ${target.label}.")
+        viewModelScope.launch {
+            _isCompiling.value = true
+            try {
+                val out = withContext(Dispatchers.Default) {
+                    compiler.compile(_sourceCode.value, useCache = false, target = target)
+                }
+                _compileOutput.value = out
+                setBanner("Binary target switched to ${target.label}.")
+            } finally {
+                _isCompiling.value = false
+            }
+        }
     }
 
     fun runSelfHostedBootstrap() {
@@ -419,8 +448,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 LibraryImporter.saveLibraryToDownloads(appContext, workspaceDir, rawName, authorLang, content)
             }
             refreshAvailableLibraries()
-            refreshWorkspaceFiles()
-            _compileOutput.value = compiler.compile(_sourceCode.value, useCache = false, target = _binaryTarget.value)
+            refreshWorkspaceFilesSuspend()
+            _compileOutput.value = withContext(Dispatchers.Default) {
+                compiler.compile(_sourceCode.value, useCache = false, target = _binaryTarget.value)
+            }
             setBanner("Saved library '$fname' ($loc).")
         }
     }
@@ -436,33 +467,36 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun exportBinaryToDownloads(): String? {
-        val art = _compileOutput.value.binaryArtifact ?: return null
+    fun exportBinaryToDownloads() {
+        val art = _compileOutput.value.binaryArtifact ?: return
         val base = _activeFileName.value.substringBeforeLast('.').ifBlank { "program" }
         val fileName = "$base${art.target.extension}"
-        val outDir = File(workspaceDir, "bin").apply { mkdirs() }
-        val binFile = File(outDir, fileName)
-        binFile.writeBytes(art.bytes)
-        File(outDir, "$base.hex.txt").writeText(art.hexDump)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            runCatching {
-                val values = android.content.ContentValues().apply {
-                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-                    put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
-                }
-                val uri = appContext.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    appContext.contentResolver.openOutputStream(uri)?.use { it.write(art.bytes) }
-                    values.clear()
-                    values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
-                    appContext.contentResolver.update(uri, values, null, null)
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val outDir = File(workspaceDir, "bin").apply { mkdirs() }
+                val binFile = File(outDir, fileName)
+                binFile.writeBytes(art.bytes)
+                File(outDir, "$base.hex.txt").writeText(art.hexDump)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    runCatching {
+                        val values = android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
+                            put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                            put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                        }
+                        val uri = appContext.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        if (uri != null) {
+                            appContext.contentResolver.openOutputStream(uri)?.use { it.write(art.bytes) }
+                            values.clear()
+                            values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                            appContext.contentResolver.update(uri, values, null, null)
+                        }
+                    }
                 }
             }
+            refreshWorkspaceFilesSuspend()
+            setBanner("Exported ${art.bytes.size} bytes to bin/$fileName & Downloads.")
         }
-        refreshWorkspaceFiles()
-        setBanner("Exported ${art.bytes.size} bytes to bin/$fileName & Downloads.")
-        return fileName
     }
 
     fun openMacroInEditor(macro: MacroRecord) {
@@ -501,28 +535,41 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun updateSource(newCode: String, syncToGraph: Boolean = true) {
         pushUndo()
         _sourceCode.value = newCode
-        _compileOutput.value = compiler.compile(newCode)
-        if (syncToGraph) {
-            _nodeGraph.value = GraphAstConverter.sourceToGraph(newCode, _nodeGraph.value, _activeFileName.value.removeSuffix(".stl"))
-        }
-        saveActiveWorkspaceFiles()
+        updateSourceAsync(newCode, syncToGraph = syncToGraph, debounceMs = 0L)
     }
 
     fun formatCode() {
-        val formatted = StudioFormatter.formatSource(_sourceCode.value)
-        updateSource(formatted, syncToGraph = true)
-        setBanner("Formatted with StudioLang canonical style.")
+        val snapshot = _sourceCode.value
+        viewModelScope.launch {
+            val formatted = withContext(Dispatchers.Default) {
+                StudioFormatter.formatSource(snapshot)
+            }
+            updateSource(formatted, syncToGraph = true)
+            setBanner("Formatted with StudioLang canonical style.")
+        }
     }
 
     fun updateGraph(newGraph: NodeGraph, syncToSource: Boolean = true) {
         pushUndo()
         _nodeGraph.value = newGraph
-        if (syncToSource) {
-            val code = GraphAstConverter.graphToSource(newGraph)
-            _sourceCode.value = code
-            _compileOutput.value = compiler.compile(code)
+        viewModelScope.launch {
+            _isCompiling.value = true
+            try {
+                if (syncToSource) {
+                    val (code, compiled) = withContext(Dispatchers.Default) {
+                        val c = GraphAstConverter.graphToSource(newGraph)
+                        c to compiler.compile(c, target = _binaryTarget.value)
+                    }
+                    _sourceCode.value = code
+                    _compileOutput.value = compiled
+                }
+                withContext(Dispatchers.IO) {
+                    saveActiveWorkspaceFiles()
+                }
+            } finally {
+                _isCompiling.value = false
+            }
         }
-        saveActiveWorkspaceFiles()
     }
 
     fun recordNodeUsed(typeId: String) {
@@ -543,8 +590,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val (g, s) = undoGraphs.removeLast()
         _nodeGraph.value = g
         _sourceCode.value = s
-        _compileOutput.value = compiler.compile(s)
-        saveActiveWorkspaceFiles()
+        updateSourceAsync(s, syncToGraph = false, debounceMs = 0L)
     }
 
     fun redoGraphOrCode() {
@@ -553,8 +599,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val (g, s) = redoGraphs.removeLast()
         _nodeGraph.value = g
         _sourceCode.value = s
-        _compileOutput.value = compiler.compile(s)
-        saveActiveWorkspaceFiles()
+        updateSourceAsync(s, syncToGraph = false, debounceMs = 0L)
     }
 
     private fun pushUndo() {
@@ -802,40 +847,61 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun buildAppProject() {
+        if (unifiedIde.isAcsBuilding.value) {
+            setBanner("Gradle build already in progress...")
+            return
+        }
         viewModelScope.launch {
             runCatching {
-                unifiedIde.runAndroidStudioGradleBuildPipeline(_appDesign.value)
+                val designSnapshot = _appDesign.value
+                val sourceSnapshot = _sourceCode.value
+                unifiedIde.executeAndroidGradleBuildPipeline(designSnapshot)
                 val out = withContext(Dispatchers.IO) {
-                    val compiledLogic = compiler.compile(_sourceCode.value).bytecode
-                    AndroidProjectGenerator.buildAndExport(_appDesign.value, generatedAppDir, appBackupsDir, compiledLogic)
+                    val compiledLogic = withContext(Dispatchers.Default) {
+                        compiler.compile(sourceSnapshot).bytecode
+                    }
+                    AndroidProjectGenerator.buildAndExport(designSnapshot, generatedAppDir, appBackupsDir, compiledLogic)
                 }
                 _appBuildOutput.value = out
-                refreshWorkspaceFiles()
+                refreshWorkspaceFilesSuspend()
                 setBanner(
                     if (out.success) "Built Gradle project (${out.generatedFiles.size} files)."
                     else "Build validation warnings: ${out.validation.errors.joinToString("; ")}"
                 )
             }.onFailure { err ->
+                if (err is CancellationException) throw err
                 setBanner("Build failed: ${err.localizedMessage ?: "Unknown error"}")
             }
         }
     }
 
     fun exportUnifiedAndroidZip() {
+        if (unifiedIde.isAcsBuilding.value) {
+            setBanner("Gradle build already in progress...")
+            return
+        }
         viewModelScope.launch {
-            val mergedDesign = unifiedIde.applyAppDesignSnapshot(_appDesign.value)
-            _appDesign.value = mergedDesign
-            unifiedIde.runAndroidStudioGradleBuildPipeline(mergedDesign)
-            val out = withContext(Dispatchers.IO) {
-                val compiledLogic = compiler.compile(_sourceCode.value).bytecode
-                AndroidProjectGenerator.buildAndExport(mergedDesign, generatedAppDir, appBackupsDir, compiledLogic)
+            runCatching {
+                val mergedDesign = unifiedIde.applyAppDesignSnapshot(_appDesign.value)
+                _appDesign.value = mergedDesign
+                val sourceSnapshot = _sourceCode.value
+                unifiedIde.executeAndroidGradleBuildPipeline(mergedDesign)
+                val out = withContext(Dispatchers.IO) {
+                    val compiledLogic = withContext(Dispatchers.Default) {
+                        compiler.compile(sourceSnapshot).bytecode
+                    }
+                    AndroidProjectGenerator.buildAndExport(mergedDesign, generatedAppDir, appBackupsDir, compiledLogic)
+                }
+                _appBuildOutput.value = out
+                refreshWorkspaceFilesSuspend()
+                setBanner(
+                    if (out.success) "Android Code Studio built & exported Gradle APK CI ZIP (${out.generatedFiles.size} files)!"
+                    else "ACS Export warnings: ${out.validation.errors.joinToString("; ")}"
+                )
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                setBanner("Export failed: ${err.localizedMessage ?: "Unknown error"}")
             }
-            _appBuildOutput.value = out
-            refreshWorkspaceFiles()
-            setBanner(
-                if (out.success) "Android Code Studio built & exported Gradle APK CI ZIP (${out.generatedFiles.size} files)!"
-                else "ACS Export warnings: ${out.validation.errors.joinToString("; ")}"
-            )
         }
     }
 
@@ -1087,35 +1153,42 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _pendingPlan.value = null
         _agentStatus.value = AgentStatus.ACTING
         var snapshot = AgentToolExecutor.WorkspaceSnapshot(_nodeGraph.value, _sourceCode.value, _appDesign.value)
-        val results = mutableListOf<String>()
-        for (call in plan.toolCalls) {
-            val (ok, msg) = toolExecutor.executeTool(
-                call = call,
-                current = snapshot,
-                onUpdate = { updated ->
-                    snapshot = updated
-                    _nodeGraph.value = updated.graph
-                    _sourceCode.value = updated.sourceCode
-                    _compileOutput.value = compiler.compile(updated.sourceCode)
-                    _appDesign.value = updated.appDesign
-                    saveActiveWorkspaceFiles()
+        viewModelScope.launch {
+            val results = mutableListOf<String>()
+            var lastCompile = _compileOutput.value
+            for (call in plan.toolCalls) {
+                val (ok, msg) = withContext(Dispatchers.Default) {
+                    toolExecutor.executeTool(
+                        call = call,
+                        current = snapshot,
+                        onUpdate = { updated ->
+                            snapshot = updated
+                            lastCompile = compiler.compile(updated.sourceCode)
+                        }
+                    )
                 }
+                _nodeGraph.value = snapshot.graph
+                _sourceCode.value = snapshot.sourceCode
+                _compileOutput.value = lastCompile
+                _appDesign.value = snapshot.appDesign
+                results += "${if (ok) "OK" else "FAIL"}: $msg"
+            }
+            withContext(Dispatchers.IO) {
+                saveActiveWorkspaceFiles()
+            }
+            _agentStatus.value = AgentStatus.VERIFYING
+            val verifyMsg = if (lastCompile.success) {
+                "Verified: compiled with 0 errors (${lastCompile.bytecode?.instructions?.size ?: 0} bytecode ops)."
+            } else {
+                "Validation issues: ${lastCompile.diagnostics.joinToString("; ") { it.message }}"
+            }
+            _agentMessages.value = _agentMessages.value + AgentMessage(
+                id = "res_${System.currentTimeMillis()}",
+                isUser = false,
+                text = (results + verifyMsg).joinToString("\n")
             )
-            results += "${if (ok) "OK" else "FAIL"}: $msg"
+            _agentStatus.value = AgentStatus.IDLE
         }
-        _agentStatus.value = AgentStatus.VERIFYING
-        val comp = _compileOutput.value
-        val verifyMsg = if (comp.success) {
-            "Verified: compiled with 0 errors (${comp.bytecode?.instructions?.size ?: 0} bytecode ops)."
-        } else {
-            "Validation issues: ${comp.diagnostics.joinToString("; ") { it.message }}"
-        }
-        _agentMessages.value = _agentMessages.value + AgentMessage(
-            id = "res_${System.currentTimeMillis()}",
-            isUser = false,
-            text = (results + verifyMsg).joinToString("\n")
-        )
-        _agentStatus.value = AgentStatus.IDLE
     }
 
     fun cancelPendingPlan() {
@@ -1127,10 +1200,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val prev = toolExecutor.popUndoSnapshot() ?: return
         _nodeGraph.value = prev.graph
         _sourceCode.value = prev.sourceCode
-        _compileOutput.value = compiler.compile(prev.sourceCode)
         _appDesign.value = prev.appDesign
-        saveActiveWorkspaceFiles()
-        setBanner("Rolled back last Agent change.")
+        viewModelScope.launch {
+            val compiled = withContext(Dispatchers.Default) {
+                compiler.compile(prev.sourceCode)
+            }
+            _compileOutput.value = compiled
+            withContext(Dispatchers.IO) {
+                saveActiveWorkspaceFiles()
+            }
+            setBanner("Rolled back last Agent change.")
+        }
     }
 
     private val _ideAiBusy = MutableStateFlow(false)
@@ -1159,6 +1239,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun askActiveAiForIde(userPrompt: String, applyToActiveFile: Boolean = true) {
         val cleanPrompt = userPrompt.trim()
         if (cleanPrompt.isEmpty()) return
+        val cfg = aiProvider.config.value
+        if (!cfg.hasApiKey && cfg.provider != AiProviderKind.CUSTOM_OPENAI) {
+            val missingMsg = "FAIL: Missing ${cfg.provider.displayName} API key. Tap 'Open AI Key Setup' below or configure your key in the Agent tab."
+            _ideAiLastReply.value = missingMsg
+            setBanner(missingMsg)
+            return
+        }
         viewModelScope.launch {
             _ideAiBusy.value = true
             _ideAiLastReply.value = "Asking ${aiProvider.providerLabel}..."
@@ -1268,7 +1355,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun refreshAndroidTweaks() {
-        _androidTweaks.value = AndroidCustomizer.readDeviceTweaks(appContext)
+        viewModelScope.launch(Dispatchers.IO) {
+            _androidTweaks.value = AndroidCustomizer.readDeviceTweaks(appContext)
+        }
     }
 
     fun refreshInstalledApps() {
@@ -1322,17 +1411,28 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun inspectTermuxStatus(): TermuxEnvironmentStatus = TermuxToolchainBridge.inspectStatus(appContext)
 
     fun refreshWorkspaceFiles() {
-        _workspaceFiles.value = workspaceDir.walkTopDown()
-            .filter { it.isFile }
-            .map { it.relativeTo(workspaceDir).path }
-            .sorted()
-            .toList()
+        viewModelScope.launch {
+            refreshWorkspaceFilesSuspend()
+        }
+    }
+
+    private suspend fun refreshWorkspaceFilesSuspend() {
+        val list = withContext(Dispatchers.IO) {
+            workspaceDir.walkTopDown()
+                .filter { it.isFile }
+                .map { it.relativeTo(workspaceDir).path }
+                .sorted()
+                .toList()
+        }
+        _workspaceFiles.value = list
     }
 
     private fun saveActiveWorkspaceFiles() {
         val name = _activeFileName.value
-        File(workspaceDir, name).writeText(_sourceCode.value)
-        File(workspaceDir, "$name.layout.json").writeText(LayoutSidecarSerializer.toJson(_nodeGraph.value))
+        val code = _sourceCode.value
+        val graph = _nodeGraph.value
+        File(workspaceDir, name).writeText(code)
+        File(workspaceDir, "$name.layout.json").writeText(LayoutSidecarSerializer.toJson(graph))
     }
 
     private fun queryDisplayName(uri: Uri): String {

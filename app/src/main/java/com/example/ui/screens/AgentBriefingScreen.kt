@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -216,7 +217,7 @@ fun AgentBriefingScreen(vm: StudioViewModel) {
                 colors = CardDefaults.cardColors(containerColor = SlateSurface),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 240.dp)
+                    .heightIn(max = 380.dp)
                     .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
                     .testTag("ai_provider_config_card")
             ) {
@@ -228,7 +229,23 @@ fun AgentBriefingScreen(vm: StudioViewModel) {
                 ) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("Any AI Provider (BYOK API Key)", style = MaterialTheme.typography.titleSmall, color = CyberCyan)
-                        TextButton(onClick = { showAiConfig = false }) { Text("Hide") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                    }.onFailure {
+                                        activeSection = "AI Studio Web"
+                                        showAiConfig = false
+                                    }
+                                },
+                                modifier = Modifier.testTag("ai_get_studio_key_btn")
+                            ) { Text("Get AI Studio Key", color = EmeraldRun) }
+                            TextButton(onClick = { showAiConfig = false }) { Text("Hide") }
+                        }
                     }
 
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -669,7 +686,13 @@ fun AgentBriefingScreen(vm: StudioViewModel) {
             }
 
             "AI Studio Web" -> {
-                AiStudioWebPane(modifier = Modifier.weight(1f))
+                AiStudioWebPane(
+                    modifier = Modifier.weight(1f),
+                    onOpenAgentKeySetup = {
+                        activeSection = "Briefing"
+                        showAiConfig = true
+                    }
+                )
             }
 
             "Foreground AI" -> {

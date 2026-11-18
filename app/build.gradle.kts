@@ -5,10 +5,10 @@ plugins {
   alias(libs.plugins.secrets)
 }
 
-// Set -PgodotEditorBuild=true to package the official Godot Android editor build.
+// Set -PgodotEditorBuild=false to build a smaller runtime-only APK without the Godot Android editor.
 val godotEditorBuild = providers.gradleProperty("godotEditorBuild")
   .map { it.equals("true", ignoreCase = true) }
-  .getOrElse(false)
+  .getOrElse(true)
 
 
 android {
@@ -75,6 +75,7 @@ android {
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
+    isCoreLibraryDesugaringEnabled = true
   }
   androidResources {
     ignoreAssetsPattern = "!.svn:!.git:!.gitignore:!.ds_store:!*.scc:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"
@@ -133,6 +134,11 @@ dependencies {
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
+  coreLibraryDesugaring(libs.desugar.jdk.libs)
+  // Android Code Studio AAR library module (with Sora CodeEditor AAR + AAPT2/XML inflater)
+  implementation(project(":android-code-studio"))
+  // Any custom .aar or .jar dropped into app/libs/
+  implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
   // Official Godot Android AAR. The tools artifact is the editor-enabled build.
   // Only one is selected to avoid duplicate Godot classes/native libraries.
   if (godotEditorBuild) {

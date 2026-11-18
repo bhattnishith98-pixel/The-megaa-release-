@@ -34,8 +34,8 @@ enum class AiProviderKind(
 ) {
     GEMINI(
         id = "gemini",
-        displayName = "Google Gemini",
-        models = listOf("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"),
+        displayName = "Google Gemini (AI Studio)",
+        models = listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash"),
         keyVaultAlias = "ai_api_key_gemini",
         keyHint = "AIza...",
         defaultBaseUrl = "https://generativelanguage.googleapis.com"
@@ -221,7 +221,7 @@ class MultiProviderAgentAi(
     }
 
     fun saveApiKey(rawKey: String) {
-        val clean = rawKey.trim()
+        val clean = rawKey.trim().trim('"', '\'')
         val p = _config.value.provider
         if (clean.isEmpty()) {
             credentialVault.deleteSecret(p.keyVaultAlias)
@@ -472,13 +472,15 @@ class MultiProviderAgentAi(
         forceJson: Boolean,
         temperature: Float = 0.7f
     ): String = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim().trim('"', '\'')
         val request = when (provider) {
             AiProviderKind.GEMINI -> {
-                val cleanModel = model.removePrefix("models/")
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent?key=$apiKey"
+                val cleanModel = model.removePrefix("models/").trim()
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent"
                 val body = buildGeminiRequestBody(systemPrompt, userPrompt, base64Pngs, forceJson, temperature)
                 Request.Builder()
                     .url(url)
+                    .addHeader("x-goog-api-key", cleanKey)
                     .post(body.toString().toRequestBody(JSON_MEDIA))
                     .build()
             }
@@ -540,7 +542,13 @@ class MultiProviderAgentAi(
                             ?: j.optString("message").takeIf { it.isNotBlank() }
                     }.getOrNull()
                     val snippet = parsedErr ?: text.take(400)
-                    throw IllegalStateException("${provider.displayName} API HTTP ${resp.code}: $snippet")
+                    val hint = when (resp.code) {
+                        401, 403 -> " Check that your ${provider.displayName} API key is valid and enabled."
+                        404 -> " Model '$model' was not found; try switching to '${provider.models.first()}'."
+                        429 -> " Quota/rate limit reached; wait a moment or switch to '${provider.models.getOrElse(1) { provider.models.first() }}'."
+                        else -> ""
+                    }
+                    throw IllegalStateException("${provider.displayName} API HTTP ${resp.code}: $snippet$hint")
                 }
                 text
             }
@@ -641,6 +649,7 @@ class MultiProviderAgentAi(
                 put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
                 val genCfg = JSONObject().apply {
                     put("temperature", temperature.toDouble())
+                    put("maxOutputTokens", 8192)
                     if (forceJson) put("responseMimeType", "application/json")
                 }
                 put("generationConfig", genCfg)

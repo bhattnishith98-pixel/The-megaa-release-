@@ -24,6 +24,11 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application
@@ -45,6 +50,8 @@
             android:name=".runtime.GodotEditorActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":godot_editor"
             android:screenOrientation="fullUser"
             android:theme="@style/Theme.MyApplication" />
 
@@ -52,6 +59,8 @@
             android:name=".runtime.GodotRuntimeActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":godot_runtime"
             android:screenOrientation="fullUser"
             android:theme="@style/Theme.MyApplication" />
 

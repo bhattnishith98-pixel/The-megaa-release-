@@ -34,6 +34,9 @@ import com.example.appbuilder.AppBuildLanguage
 import com.example.appbuilder.AppDesign
 import com.example.ide.*
 import com.example.ui.theme.*
+import com.tom.rv2ide.studio.AcsAarRuntime
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 @Composable
@@ -506,6 +509,8 @@ private fun AndroidCodeStudioLivePane(
     val acsBuildLang by ide.acsBuildLanguage.collectAsState()
     val acsBuildVariant by ide.acsBuildVariant.collectAsState()
     val acsBuildPhases by ide.acsBuildPhases.collectAsState()
+    val isAcsBuilding by ide.isAcsBuilding.collectAsState()
+    val isCompiling by ide.isCompiling.collectAsState()
 
     val sourceForPreview = files.firstOrNull {
         it.path == activePath && (it.path.endsWith(".kt") || (it.path.endsWith(".xml") && !it.path.endsWith("AndroidManifest.xml")))
@@ -543,6 +548,57 @@ private fun AndroidCodeStudioLivePane(
             color = CyberCyan
         )
 
+        val editorConfig by ide.editorConfig.collectAsState()
+        val aarStatus by produceState<AcsAarRuntime.AcsAarStatus?>(initialValue = null, files.size) {
+            value = withContext(Dispatchers.IO) {
+                AcsAarRuntime.inspectStatus(listOf(ide.nativeCompilerWorkspaceRoot()))
+            }
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = ObsidianBg),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, EmeraldRun.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                .testTag("acs_aar_status_card")
+        ) {
+            Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Android Code Studio AAR",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = EmeraldRun
+                    )
+                    FilterChip(
+                        selected = editorConfig.useSoraAar,
+                        onClick = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
+                        label = { Text(if (editorConfig.useSoraAar) "Sora AAR ON" else "Compose Mode", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("acs_panel_sora_toggle")
+                    )
+                }
+                val st = aarStatus
+                Text(
+                    if (st != null) {
+                        "Module ${st.libraryModule} (${st.packageNamespace}) · ${st.soraEditorArtifact} · Live=${st.soraClassPresent}"
+                    } else {
+                        "Inspecting :android-code-studio AAR..."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+                if (st != null && st.discoveredExternalAars.isNotEmpty()) {
+                    Text(
+                        "Workspace libs: ${st.discoveredExternalAars.joinToString(", ")}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyberCyan
+                    )
+                }
+            }
+        }
+
         // Multi-Language App Build Selector (Build in Any Language)
         Text("Build App Language (Any Language)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
         LazyRow(
@@ -568,23 +624,42 @@ private fun AndroidCodeStudioLivePane(
                     onClick = {
                         ide.runAndroidStudioGradleBuildPipeline(appDesign.copy(buildLanguage = acsBuildLang))
                     },
+                    enabled = !isAcsBuilding,
                     modifier = Modifier.defaultMinSize(minHeight = 42.dp).testTag("acs_gradle_build_btn"),
                     colors = ButtonDefaults.buttonColors(containerColor = NeonViolet, contentColor = TextPrimary)
-                ) { Text("Gradle Build", style = MaterialTheme.typography.labelSmall) }
+                ) {
+                    if (isAcsBuilding) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = TextPrimary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Building...", style = MaterialTheme.typography.labelSmall)
+                    } else {
+                        Text("Gradle Build", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
             item {
                 Button(
                     onClick = { ide.runCompileAndTest() },
+                    enabled = !isCompiling && !isAcsBuilding,
                     modifier = Modifier.defaultMinSize(minHeight = 42.dp).testTag("acs_run_test_btn"),
                     colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = ObsidianBg)
-                ) { Text("Verify & Test", style = MaterialTheme.typography.labelSmall) }
+                ) {
+                    Text(if (isCompiling) "Testing..." else "Verify & Test", style = MaterialTheme.typography.labelSmall)
+                }
             }
             item {
                 Button(
                     onClick = onExportZip,
+                    enabled = !isAcsBuilding,
                     modifier = Modifier.defaultMinSize(minHeight = 42.dp).testTag("acs_export_zip_btn"),
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
-                ) { Text("Build APK ZIP", style = MaterialTheme.typography.labelSmall) }
+                ) {
+                    Text(if (isAcsBuilding) "Busy..." else "Build APK ZIP", style = MaterialTheme.typography.labelSmall)
+                }
             }
             item {
                 OutlinedButton(

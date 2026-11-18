@@ -185,7 +185,8 @@ fun EditorQuickActionsHeader(
     onFontSizeChange: (Int) -> Unit,
     onRunFindReplace: (String, String, Boolean) -> Unit,
     onInsertSnippet: (String) -> Unit,
-    onRunVscodeCommand: (String) -> Unit = {}
+    onRunVscodeCommand: (String) -> Unit = {},
+    onToggleSoraAar: () -> Unit = {}
 ) {
     var findQuery by remember { mutableStateOf("") }
     var replaceText by remember { mutableStateOf("") }
@@ -226,6 +227,18 @@ fun EditorQuickActionsHeader(
                     contentDescription = "Split Editor Right",
                     tint = if (splitOpen) CyberCyan else TextSecondary,
                     modifier = Modifier.size(20.dp).clickable { onToggleSplit() }.padding(2.dp).testTag("editor_split_btn")
+                )
+            }
+            item {
+                Text(
+                    if (editorConfig.useSoraAar) "Sora AAR" else "Compose",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (editorConfig.useSoraAar) EmeraldRun else CyberCyan,
+                    modifier = Modifier
+                        .background(SlateCard, RoundedCornerShape(4.dp))
+                        .clickable { onToggleSoraAar() }
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                        .testTag("editor_sora_aar_toggle_btn")
                 )
             }
             item {

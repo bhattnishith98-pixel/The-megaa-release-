@@ -36,7 +36,10 @@ import kotlinx.coroutines.withContext
  * 3. Android Code Studio (App Override Mode, Live Interactive Preview & Tester, Manifest Audit, Gradle APK ZIP Builder)
  */
 @Composable
-fun UnifiedIdeScreen(vm: StudioViewModel) {
+fun UnifiedIdeScreen(
+    vm: StudioViewModel,
+    onOpenAgentConfig: () -> Unit = {}
+) {
     val ide = vm.unifiedIde
     val workspaceMode by ide.workspaceMode.collectAsStateWithLifecycle()
     val themePreset by ide.themePreset.collectAsStateWithLifecycle()
@@ -72,8 +75,47 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
     val aiConfig by vm.aiProvider.config.collectAsStateWithLifecycle()
     val ideAiBusy by vm.ideAiBusy.collectAsStateWithLifecycle()
     val ideAiReply by vm.ideAiLastReply.collectAsStateWithLifecycle()
+    val isAcsBuilding by ide.isAcsBuilding.collectAsStateWithLifecycle()
+    val isCompiling by ide.isCompiling.collectAsStateWithLifecycle()
+    val activeProject by ide.activeProject.collectAsStateWithLifecycle()
+    val recentProjects by ide.recentProjects.collectAsStateWithLifecycle()
+    val projectSyncState by ide.projectSyncState.collectAsStateWithLifecycle()
+    val projectSyncMessage by ide.projectSyncMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        ide.attachAppContext(context)
+    }
+
+    val safFolderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            vm.setBanner("Scanning folder for project files...")
+            ide.openSafFolderProject(context, uri) { msg -> vm.setBanner(msg) }
+        }
+    }
+
+    val anyZipProjectPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            vm.setBanner("Extracting project ZIP...")
+            ide.importZipProject(context, uri) { msg -> vm.setBanner(msg) }
+        }
+    }
+
+    var pendingExportProject by remember { mutableStateOf<IdeProjectDescriptor?>(null) }
+    val exportProjectZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) {
+            val target = pendingExportProject ?: activeProject
+            ide.exportProjectZipToUri(context, target, uri) { msg -> vm.setBanner(msg) }
+        }
+        pendingExportProject = null
+    }
 
     val nativeToolchainPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -123,6 +165,7 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
     var showLicensesDialog by remember { mutableStateOf(false) }
     var repoSetupDialogKind by remember { mutableStateOf<UpstreamRepoKind?>(null) }
     var showRepoSetupDialog by remember { mutableStateOf(false) }
+    var showProjectManagerDialog by remember { mutableStateOf(false) }
 
     var compactDrawerOpen by remember { mutableStateOf(false) }
 
@@ -148,17 +191,43 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             item {
-                Surface(
-                    color = SlateElevated,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.border(1.dp, CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                ) {
-                    Text(
-                        "TRI-PANE IDE",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CyberCyan,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                FilledTonalButton(
+                    onClick = { showProjectManagerDialog = true },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_project_chip"),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = SlateElevated,
+                        contentColor = CyberCyan
                     )
+                ) {
+                    Icon(
+                        imageVector = if (activeProject.isDirectFolder) Icons.Filled.Folder else Icons.Filled.FolderOpen,
+                        contentDescription = "Open or switch project",
+                        modifier = Modifier.size(16.dp),
+                        tint = if (activeProject.isDirectFolder) EmeraldRun else CyberCyan
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        "${activeProject.name} · ${activeProject.detectedType.label}",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+            if (files.any { it.isDirty } || activeProject.isDirectFolder) {
+                item {
+                    OutlinedButton(
+                        onClick = { ide.saveAllDirtyFiles { msg -> vm.setBanner(msg) } },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_save_all_btn")
+                    ) {
+                        Icon(Icons.Filled.Save, contentDescription = "Save all project files", modifier = Modifier.size(15.dp), tint = EmeraldRun)
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            if (projectSyncState == ProjectSyncState.SAVING) "Saving..." else "Save",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = EmeraldRun
+                        )
+                    }
                 }
             }
             item {
@@ -180,13 +249,14 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
             item {
                 Button(
                     onClick = { ide.runCompileAndTest() },
+                    enabled = !isCompiling && !isAcsBuilding,
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_run_all_btn"),
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
                 ) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Run / Test", style = MaterialTheme.typography.labelSmall)
+                    Text(if (isCompiling) "Testing..." else "Run / Test", style = MaterialTheme.typography.labelSmall)
                 }
             }
             item {
@@ -241,30 +311,79 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                 }
             }
             item {
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            val sync = withContext(Dispatchers.IO) { ide.syncGodot47ProjectToDisk(context) }
+                            context.startActivity(
+                                com.example.runtime.GodotRuntimeActivity.createIntent(
+                                    context = context,
+                                    projectPath = sync.projectDir.absolutePath,
+                                    mainScene = sync.mainSceneResPath
+                                )
+                            )
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_run_godot_47_btn"),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = ObsidianBg)
+                ) {
+                    Icon(Icons.Filled.SportsEsports, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Run Godot 4.7", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            item {
                 OutlinedButton(
                     onClick = {
-                        context.startActivity(Intent(context, com.example.runtime.GodotRuntimeActivity::class.java))
+                        context.startActivity(com.example.runtime.GodotRuntimeActivity.createIntent(context))
                     },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_real_godot_runtime_btn")
                 ) {
                     Icon(Icons.Filled.ViewInAr, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Real Godot 3D", style = MaterialTheme.typography.labelSmall)
+                    Text("Godot 3D", style = MaterialTheme.typography.labelSmall)
                 }
             }
             if (BuildConfig.GODOT_EDITOR_BUILD) {
                 item {
                     OutlinedButton(
                         onClick = {
-                            context.startActivity(Intent(context, com.example.runtime.GodotEditorActivity::class.java))
+                            coroutineScope.launch {
+                                val sync = withContext(Dispatchers.IO) { ide.syncGodot47ProjectToDisk(context) }
+                                context.startActivity(
+                                    com.example.runtime.GodotEditorActivity.createIntent(
+                                        context = context,
+                                        projectPath = sync.projectDir.absolutePath
+                                    )
+                                )
+                            }
                         },
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                         modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_godot_editor_btn")
                     ) {
                         Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Godot Editor", style = MaterialTheme.typography.labelSmall)
+                        Text("Godot 4.7 Editor", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                com.example.runtime.GodotEditorActivity.createIntent(
+                                    context = context,
+                                    openProjectManager = true
+                                )
+                            )
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.defaultMinSize(minHeight = 38.dp).testTag("ide_godot_project_manager_btn")
+                    ) {
+                        Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Project Mgr", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -435,6 +554,19 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                         ideAiBusy = ideAiBusy,
                         ideAiReply = ideAiReply,
                         onAskIdeAi = { prompt -> vm.askActiveAiForIde(prompt, applyToActiveFile = true) },
+                        isAcsBuilding = isAcsBuilding,
+                        onOpenAgentConfig = onOpenAgentConfig,
+                        activeProjectName = activeProject.name,
+                        projectSyncMessage = projectSyncMessage,
+                        onOpenProjectsManager = { showProjectManagerDialog = true },
+                        onSaveAllFiles = { ide.saveAllDirtyFiles { msg -> vm.setBanner(msg) } },
+                        onDeleteFile = { path -> ide.deleteFileFromActiveProject(path) { msg -> vm.setBanner(msg) } },
+                        onExportProjectZip = {
+                            pendingExportProject = activeProject
+                            val safeZip = activeProject.name.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "project" }
+                            runCatching { exportProjectZipLauncher.launch("$safeZip.zip") }
+                                .onFailure { err -> vm.setBanner("Document saver unavailable: ${err.localizedMessage ?: "No handler"}") }
+                        },
                         modifier = Modifier.width(if (isLandscapeWide) drawerWidth else 155.dp)
                     )
                 }
@@ -468,6 +600,7 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                         onToggleWordWrap = { ide.updateEditorConfig { it.copy(wordWrap = !it.wordWrap) } },
                         onToggleAutoSave = { ide.updateEditorConfig { it.copy(autoSave = !it.autoSave) } },
                         onRunVscodeCommand = { cmd -> ide.executeVscodeTextCommand(cmd) },
+                        onToggleSoraAar = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
                         modifier = Modifier.weight(1.1f)
                     )
 
@@ -511,6 +644,7 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                             onToggleWordWrap = { ide.updateEditorConfig { it.copy(wordWrap = !it.wordWrap) } },
                             onToggleAutoSave = { ide.updateEditorConfig { it.copy(autoSave = !it.autoSave) } },
                             onRunVscodeCommand = { cmd -> ide.executeVscodeTextCommand(cmd) },
+                            onToggleSoraAar = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         )
 
@@ -573,6 +707,54 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                     "cmd.mode_acs" -> ide.setWorkspaceMode(IdeWorkspaceMode.ANDROID_CODE_STUDIO)
                     "cmd.godot_play" -> if (ide.isScenePlaying.value) ide.pauseScene() else ide.playScene()
                     "cmd.godot_stop" -> ide.stopScene()
+                    "cmd.godot_run_47" -> coroutineScope.launch {
+                        val sync = withContext(Dispatchers.IO) { ide.syncGodot47ProjectToDisk(context) }
+                        context.startActivity(
+                            com.example.runtime.GodotRuntimeActivity.createIntent(
+                                context = context,
+                                projectPath = sync.projectDir.absolutePath,
+                                mainScene = sync.mainSceneResPath
+                            )
+                        )
+                    }
+                    "cmd.godot_editor_47" -> {
+                        if (BuildConfig.GODOT_EDITOR_BUILD) {
+                            coroutineScope.launch {
+                                val sync = withContext(Dispatchers.IO) { ide.syncGodot47ProjectToDisk(context) }
+                                context.startActivity(
+                                    com.example.runtime.GodotEditorActivity.createIntent(
+                                        context = context,
+                                        projectPath = sync.projectDir.absolutePath
+                                    )
+                                )
+                            }
+                        } else {
+                            vm.setBanner("Godot Editor is disabled in runtime-only builds.")
+                        }
+                    }
+                    "cmd.godot_project_manager" -> {
+                        if (BuildConfig.GODOT_EDITOR_BUILD) {
+                            context.startActivity(
+                                com.example.runtime.GodotEditorActivity.createIntent(
+                                    context = context,
+                                    openProjectManager = true
+                                )
+                            )
+                        } else {
+                            vm.setBanner("Godot Project Manager requires editor-enabled build.")
+                        }
+                    }
+                    "cmd.godot_3d_demo" -> context.startActivity(
+                        com.example.runtime.GodotRuntimeActivity.createIntent(context)
+                    )
+                    "cmd.godot_sync_disk" -> coroutineScope.launch {
+                        val sync = withContext(Dispatchers.IO) { ide.syncGodot47ProjectToDisk(context) }
+                        vm.setBanner("Synced ${sync.writtenFilesCount} files to Godot 4.7.2 workspace.")
+                    }
+                    "cmd.godot_export_zip" -> coroutineScope.launch {
+                        val zip = withContext(Dispatchers.IO) { ide.exportGodot47ProjectZip(context) }
+                        vm.setBanner("Exported Godot 4.7.2 project ZIP: ${zip.name}")
+                    }
                     "cmd.godot_add_node" -> showAddNodeDialog = true
                     "cmd.godot_attach_script" -> {
                         val target = sceneNodes.firstOrNull { it.id == selectedNodeId } ?: sceneNodes.firstOrNull()
@@ -627,6 +809,47 @@ fun UnifiedIdeScreen(vm: StudioViewModel) {
                 }
             },
             onDismiss = { showRepoSetupDialog = false }
+        )
+    }
+
+    if (showProjectManagerDialog) {
+        ProjectManagerDialog(
+            activeProject = activeProject,
+            recentProjects = recentProjects,
+            syncState = projectSyncState,
+            syncMessage = projectSyncMessage,
+            onDismiss = { showProjectManagerDialog = false },
+            onOpenDeviceFolder = {
+                runCatching { safFolderPicker.launch(null) }.onFailure { err ->
+                    vm.setBanner("Folder picker unavailable: ${err.localizedMessage ?: "No handler"}")
+                }
+            },
+            onImportZipProject = {
+                runCatching { anyZipProjectPicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*")) }
+                    .onFailure { err ->
+                        vm.setBanner("ZIP picker unavailable: ${err.localizedMessage ?: "No handler"}")
+                    }
+            },
+            onCloneGithubRepo = { url, branch ->
+                vm.setBanner("Cloning $url...")
+                ide.cloneGithubProject(url, branch) { msg -> vm.setBanner(msg) }
+            },
+            onCreateNewProject = { name, template ->
+                ide.createNewInAppProject(name, template) { msg -> vm.setBanner(msg) }
+            },
+            onSwitchProject = { proj ->
+                ide.switchToProject(context, proj) { msg -> vm.setBanner(msg) }
+            },
+            onExportProjectZip = { proj ->
+                pendingExportProject = proj
+                val safeZip = proj.name.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "project" }
+                runCatching { exportProjectZipLauncher.launch("$safeZip.zip") }
+                    .onFailure { err -> vm.setBanner("Document saver unavailable: ${err.localizedMessage ?: "No handler"}") }
+            },
+            onDeleteProject = { proj ->
+                ide.removeProject(proj)
+                vm.setBanner("Removed '${proj.name}' from Recent Projects.")
+            }
         )
     }
     }

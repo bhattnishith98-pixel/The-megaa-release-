@@ -32,9 +32,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.appbuilder.AppBuildLanguage
 import com.example.ide.*
 import com.example.ui.theme.*
+import com.tom.rv2ide.studio.AcsAarRuntime
+import com.tom.rv2ide.studio.AcsEditorThemeColors
+import com.tom.rv2ide.studio.AcsSoraEditorFactory
+import com.tom.rv2ide.studio.AcsSoraEditorHandle
 
 @Composable
 fun VsCodeActivityRail(
@@ -126,6 +131,14 @@ fun VsCodeLeftDrawerPane(
     ideAiBusy: Boolean = false,
     ideAiReply: String? = null,
     onAskIdeAi: (String) -> Unit = {},
+    isAcsBuilding: Boolean = false,
+    onOpenAgentConfig: () -> Unit = {},
+    activeProjectName: String = "Automation Sandbox",
+    projectSyncMessage: String = "",
+    onOpenProjectsManager: () -> Unit = {},
+    onSaveAllFiles: () -> Unit = {},
+    onDeleteFile: (String) -> Unit = {},
+    onExportProjectZip: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -144,15 +157,66 @@ fun VsCodeLeftDrawerPane(
 
         when (activeTab) {
             IdeActivityTab.EXPLORER -> {
-                Button(
-                    onClick = onNewFileClick,
-                    modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 40.dp).testTag("new_ide_file_btn"),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = SlateElevated, contentColor = CyberCyan)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(ObsidianBg, RoundedCornerShape(8.dp))
+                        .border(1.dp, CyberCyan.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .clickable { onOpenProjectsManager() }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .testTag("explorer_projects_btn"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("New File", style = MaterialTheme.typography.labelSmall)
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            activeProjectName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = CyberCyan,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (projectSyncMessage.isNotBlank()) {
+                            Text(
+                                projectSyncMessage,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Icon(Icons.Filled.FolderOpen, contentDescription = "Switch Project", tint = CyberCyan, modifier = Modifier.size(16.dp))
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Button(
+                        onClick = onNewFileClick,
+                        modifier = Modifier.weight(1f).defaultMinSize(minHeight = 40.dp).testTag("new_ide_file_btn"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = SlateElevated, contentColor = CyberCyan)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("File", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = onSaveAllFiles,
+                        modifier = Modifier.defaultMinSize(minHeight = 40.dp).testTag("explorer_save_all_btn"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+                    ) {
+                        Text("Save", style = MaterialTheme.typography.labelSmall, color = EmeraldRun)
+                    }
+                    OutlinedButton(
+                        onClick = onExportProjectZip,
+                        modifier = Modifier.defaultMinSize(minHeight = 40.dp).testTag("explorer_export_zip_btn"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+                    ) {
+                        Text("ZIP", style = MaterialTheme.typography.labelSmall, color = AmberWarn)
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -163,22 +227,34 @@ fun VsCodeLeftDrawerPane(
                                 .fillMaxWidth()
                                 .background(if (active) CyberCyan.copy(alpha = 0.16f) else Color.Transparent, RoundedCornerShape(6.dp))
                                 .clickable { onOpenFile(f.path) }
-                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                                .padding(start = 8.dp, end = 2.dp, top = 5.dp, bottom = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                f.languageHint.uppercase(),
+                                f.languageHint.uppercase().take(4),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = EmeraldRun
+                                color = if (f.isDirty) AmberWarn else EmeraldRun
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                f.path,
+                                if (f.isDirty) "${f.path} *" else f.path,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (active) TextPrimary else TextSecondary,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
+                            IconButton(
+                                onClick = { onDeleteFile(f.path) },
+                                modifier = Modifier.size(28.dp).testTag("delete_file_${f.title}")
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Delete ${f.title}",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -326,10 +402,11 @@ fun VsCodeLeftDrawerPane(
                 Spacer(Modifier.height(4.dp))
                 Button(
                     onClick = onRunAcsGradleBuild,
+                    enabled = !isAcsBuilding,
                     modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 42.dp).testTag("drawer_acs_gradle_build_btn"),
                     colors = ButtonDefaults.buttonColors(containerColor = NeonViolet, contentColor = TextPrimary)
                 ) {
-                    Text("Gradle Build (ACS)", style = MaterialTheme.typography.labelSmall)
+                    Text(if (isAcsBuilding) "Building Gradle..." else "Gradle Build (ACS)", style = MaterialTheme.typography.labelSmall)
                 }
                 Spacer(Modifier.height(6.dp))
                 Text("Build App Language", style = MaterialTheme.typography.labelSmall, color = CyberCyan)
@@ -419,6 +496,15 @@ fun VsCodeLeftDrawerPane(
                             color = if (ideAiReply.startsWith("FAIL:")) RoseError else EmeraldRun
                         )
                     }
+                    OutlinedButton(
+                        onClick = onOpenAgentConfig,
+                        modifier = Modifier.fillMaxWidth().testTag("ide_open_ai_setup_btn"),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(14.dp), tint = AmberWarn)
+                        Spacer(Modifier.width(4.dp))
+                        Text("AI Studio Key Setup", style = MaterialTheme.typography.labelSmall, color = AmberWarn)
+                    }
 
                     HorizontalDivider(color = SlateBorder, modifier = Modifier.padding(vertical = 4.dp))
                     Text("Quick Voice Macros", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
@@ -477,6 +563,7 @@ fun VsCodeEditorAndTerminalPane(
     onToggleWordWrap: () -> Unit = {},
     onToggleAutoSave: () -> Unit = {},
     onRunVscodeCommand: (String) -> Unit = {},
+    onToggleSoraAar: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val activeFile = files.firstOrNull { it.path == activeTabPath }
@@ -485,6 +572,10 @@ fun VsCodeEditorAndTerminalPane(
     var findOpen by remember { mutableStateOf(false) }
     val symbolTokens = remember { listOf("{", "}", "(", ")", ":", "=", ".", "_", "->", "\"", "#") }
     val snippets = remember(activeTabPath) { VsCodeEditorFeaturesEngine.snippetsForFile(activeTabPath) }
+    val soraAarAvailable = remember { AcsAarRuntime.isSoraEditorAvailable() }
+    val useSoraAarNow = editorConfig.useSoraAar && soraAarAvailable
+    var soraHandle by remember { mutableStateOf<AcsSoraEditorHandle?>(null) }
+    val currentOnContentChange by rememberUpdatedState(onContentChange)
 
     Column(
         modifier = modifier
@@ -549,7 +640,12 @@ fun VsCodeEditorAndTerminalPane(
                         color = SlateCard,
                         shape = RoundedCornerShape(4.dp),
                         modifier = Modifier.clickable {
-                            activeFile?.let { onContentChange(it.content + tok) }
+                            val handle = soraHandle
+                            if (useSoraAarNow && handle != null) {
+                                handle.insertAtCursor(tok)
+                            } else {
+                                activeFile?.let { onContentChange(it.content + tok) }
+                            }
                         }
                     ) {
                         Text(
@@ -591,12 +687,18 @@ fun VsCodeEditorAndTerminalPane(
             onFontSizeChange = onFontSizeChange,
             onRunFindReplace = onFindReplace,
             onInsertSnippet = { snip ->
-                activeFile?.let { onContentChange(it.content + "\n" + snip) }
+                val handle = soraHandle
+                if (useSoraAarNow && handle != null) {
+                    handle.insertAtCursor("\n$snip")
+                } else {
+                    activeFile?.let { onContentChange(it.content + "\n" + snip) }
+                }
             },
-            onRunVscodeCommand = onRunVscodeCommand
+            onRunVscodeCommand = onRunVscodeCommand,
+            onToggleSoraAar = onToggleSoraAar
         )
 
-        // Code Editor Body with Line Gutter (+ optional Split Right side-by-side pane)
+        // Code Editor Body with Sora CodeEditor AAR or Compose Fallback (+ optional Split Right side-by-side pane)
         val editorScroll = rememberScrollState()
         val fontSize = editorConfig.fontSizeSp.sp
         val lineHeight = (editorConfig.fontSizeSp + 6).sp
@@ -605,22 +707,60 @@ fun VsCodeEditorAndTerminalPane(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            val wrapScrollModifier = if (!editorConfig.wordWrap) {
-                Modifier.horizontalScroll(rememberScrollState())
+            if (activeFile == null) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight().padding(16.dp)) {
+                    Text("Select a file or attach a script to a Godot node.", color = TextMuted)
+                }
+            } else if (useSoraAarNow) {
+                val acsTheme = remember(theme) {
+                    AcsEditorThemeColors(
+                        editorBackgroundArgb = theme.editorBgHex.toInt(),
+                        gutterBackgroundArgb = theme.gutterBgHex.toInt(),
+                        accentArgb = theme.accentHex.toInt(),
+                        textPrimaryArgb = 0xFFF8FAFC.toInt(),
+                        lineNumberArgb = 0xFF64748B.toInt()
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .testTag("vscode_sora_aar_editor")
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            AcsSoraEditorFactory.create(ctx).also { handle ->
+                                soraHandle = handle
+                            }.editor
+                        },
+                        update = { editor ->
+                            val handle = soraHandle?.takeIf { it.editor === editor } ?: AcsSoraEditorHandle(editor).also { soraHandle = it }
+                            handle.bind(
+                                text = activeFile.content,
+                                languageHint = activeFile.languageHint,
+                                fontSizeSp = editorConfig.fontSizeSp.toFloat(),
+                                wordWrap = editorConfig.wordWrap,
+                                theme = acsTheme,
+                                onTextChanged = { updated -> currentOnContentChange(updated) }
+                            )
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             } else {
-                Modifier
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .verticalScroll(editorScroll)
-                    .then(wrapScrollModifier)
-                    .padding(6.dp)
-            ) {
-                if (activeFile == null) {
-                    Text("Select a file or attach a script to a Godot node.", color = TextMuted, modifier = Modifier.padding(16.dp))
+                val wrapScrollModifier = if (!editorConfig.wordWrap) {
+                    Modifier.horizontalScroll(rememberScrollState())
                 } else {
+                    Modifier
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .verticalScroll(editorScroll)
+                        .then(wrapScrollModifier)
+                        .padding(6.dp)
+                ) {
                     val syntaxVisual = remember(theme, activeFile.languageHint) {
                         VsCodeEditorFeaturesEngine.buildSyntaxVisualTransformation(theme, activeFile.languageHint)
                     }
