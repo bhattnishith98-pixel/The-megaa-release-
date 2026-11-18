@@ -1,0 +1,34 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/runtime_demo.gd" id="1"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_main"]
+size = Vector3(2, 2, 2)
+
+[sub_resource type="Environment" id="Environment_main"]
+background_mode = 1
+background_color = Color(0.025, 0.04, 0.09, 1)
+ambient_light_source = 3
+
+[node name="AutomationStudio3D" type="Node3D"]
+script = ExtResource("1")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_main")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-48, -32, 0)
+light_energy = 1.4
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(0, 2.5, 7)
+current = true
+
+[node name="DemoCube" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_main")
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+position = Vector3(0, -1.4, 0)
+mesh = SubResource("BoxMesh_main")
+scale = Vector3(8, 0.2, 8)

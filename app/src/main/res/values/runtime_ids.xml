@@ -1,0 +1,4 @@
+<resources>
+    <item name="godot_runtime_container" type="id" />
+    <item name="godot_editor_container" type="id" />
+</resources>

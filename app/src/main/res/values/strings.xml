@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Automation Studio</string>
+    <string name="accessibility_service_description">Allows Automation Studio to perform user-initiated taps, typing, scrolling, and read visible UI text when executing authorized macros or Godot screen observation loops.</string>
+    <string name="channel_automation_name">Automation Execution</string>
+    <string name="channel_capture_name">Screen Observation</string>
+    <string name="channel_macro_notify_name">Macro Notifications</string>
+    <string name="channel_floating_ai_name">Floating AI Voice Overlay</string>
+    <string name="notification_trigger_service_label">SMS &amp; App Notification Triggers</string>
+</resources>

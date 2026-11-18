@@ -1,0 +1,100 @@
+name: Automation Studio - Godot Runtime and Editor APKs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +o pipefail
+          yes | sdkmanager --licenses
+          license_status=${PIPESTATUS[1]}
+          set -o pipefail
+          if [ "$license_status" -ne 0 ]; then
+            echo "::error::Android SDK license acceptance failed"
+            exit "$license_status"
+          fi
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Generate Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 9.3.1 --distribution-type bin
+          chmod +x gradlew
+
+      - name: Create debug keystore
+        run: |
+          keytool -genkeypair -noprompt \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+
+      - name: Build runtime APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Save runtime APK
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/godot-apks"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            "$RUNNER_TEMP/godot-apks/Automation-Studio-Godot-Runtime.apk"
+
+      - name: Build editor-enabled APK
+        run: |
+          ./gradlew clean :app:assembleDebug \
+            -PgodotEditorBuild=true \
+            --no-daemon --stacktrace
+
+      - name: Save editor APK
+        run: |
+          set -euo pipefail
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            "$RUNNER_TEMP/godot-apks/Automation-Studio-Godot-Editor.apk"
+          ls -lh "$RUNNER_TEMP/godot-apks/"
+
+      - name: Upload runtime and editor APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Automation-Studio-Godot-APKs
+          path: ${{ runner.temp }}/godot-apks/*.apk
+          if-no-files-found: error
+          retention-days: 14
