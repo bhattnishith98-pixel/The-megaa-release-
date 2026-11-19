@@ -600,7 +600,16 @@ fun UnifiedIdeScreen(
                         onToggleWordWrap = { ide.updateEditorConfig { it.copy(wordWrap = !it.wordWrap) } },
                         onToggleAutoSave = { ide.updateEditorConfig { it.copy(autoSave = !it.autoSave) } },
                         onRunVscodeCommand = { cmd -> ide.executeVscodeTextCommand(cmd) },
-                        onToggleSoraAar = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
+                        onToggleSoraAar = {
+                            ide.updateEditorConfig { cfg ->
+                                val next = when (cfg.backend) {
+                                    IdeEditorBackend.SORA_AAR -> IdeEditorBackend.VSCODROID_AAR
+                                    IdeEditorBackend.VSCODROID_AAR -> IdeEditorBackend.COMPOSE
+                                    IdeEditorBackend.COMPOSE -> IdeEditorBackend.SORA_AAR
+                                }
+                                cfg.copy(backend = next)
+                            }
+                        },
                         modifier = Modifier.weight(1.1f)
                     )
 
@@ -644,7 +653,16 @@ fun UnifiedIdeScreen(
                             onToggleWordWrap = { ide.updateEditorConfig { it.copy(wordWrap = !it.wordWrap) } },
                             onToggleAutoSave = { ide.updateEditorConfig { it.copy(autoSave = !it.autoSave) } },
                             onRunVscodeCommand = { cmd -> ide.executeVscodeTextCommand(cmd) },
-                            onToggleSoraAar = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
+                            onToggleSoraAar = {
+                                ide.updateEditorConfig { cfg ->
+                                    val next = when (cfg.backend) {
+                                        IdeEditorBackend.SORA_AAR -> IdeEditorBackend.VSCODROID_AAR
+                                        IdeEditorBackend.VSCODROID_AAR -> IdeEditorBackend.COMPOSE
+                                        IdeEditorBackend.COMPOSE -> IdeEditorBackend.SORA_AAR
+                                    }
+                                    cfg.copy(backend = next)
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         )
 

@@ -59,8 +59,20 @@ object StudioTriggerBus {
     private val _isCharging = MutableStateFlow(false)
     val isCharging: StateFlow<Boolean> = _isCharging.asStateFlow()
 
+    private val _batteryTempC = MutableStateFlow(30.0)
+    val batteryTempC: StateFlow<Double> = _batteryTempC.asStateFlow()
+
+    private val _powerSource = MutableStateFlow("battery")
+    val powerSource: StateFlow<String> = _powerSource.asStateFlow()
+
+    private val _lastAutoRunSummary = MutableStateFlow<String?>(null)
+    val lastAutoRunSummary: StateFlow<String?> = _lastAutoRunSummary.asStateFlow()
+
     private val _recentEvents = MutableStateFlow<List<TriggerEventRecord>>(emptyList())
     val recentEvents: StateFlow<List<TriggerEventRecord>> = _recentEvents.asStateFlow()
+
+    @Volatile
+    private var lastEmittedBatteryPct: Int = -1
 
     fun extractOtp(text: String): String {
         val lower = text.lowercase()
@@ -126,9 +138,48 @@ object StudioTriggerBus {
         )
     }
 
-    fun recordBatteryState(level: Int, charging: Boolean) {
+    fun recordBatteryState(
+        level: Int,
+        charging: Boolean,
+        tempC: Double = _batteryTempC.value,
+        source: String = _powerSource.value
+    ) {
+        val prevLevel = _batteryLevel.value
         _batteryLevel.value = level
         _isCharging.value = charging
+        _batteryTempC.value = tempC
+        _powerSource.value = source
+        if (lastEmittedBatteryPct != level && (lastEmittedBatteryPct != -1 || level != prevLevel)) {
+            lastEmittedBatteryPct = level
+            pushEvent("trigger.battery_changed", "Battery/Power", "Battery ${level}% (${if (charging) "charging:$source" else "discharging"}, ${"%.1f".format(tempC)}C)")
+        } else if (lastEmittedBatteryPct == -1) {
+            lastEmittedBatteryPct = level
+        }
+    }
+
+    fun recordMacroAutoRun(macroName: String, outcome: String) {
+        _lastAutoRunSummary.value = "$macroName -> $outcome"
+    }
+
+    fun matchesTrigger(patternId: String, patternParam: String, event: TriggerEventRecord): Boolean {
+        val normPat = patternId.trim().lowercase()
+        val normEvt = event.triggerTypeId.trim().lowercase()
+        if (normPat.isEmpty() || normPat == "trigger.manual" || normPat == "manual") return false
+        if (normPat == "*" || normPat == "trigger.any") return true
+        val idMatched = normEvt == normPat ||
+            normEvt.startsWith(normPat) ||
+            normPat.removePrefix("trigger.") == normEvt.removePrefix("trigger.") ||
+            (normPat.contains("battery") && normPat.contains("level") && normEvt == "trigger.battery_changed") ||
+            (normPat.contains("power_connect") && normEvt in setOf("trigger.power_connected", "trigger.power_disconnected")) ||
+            (normPat.contains("sms") && normEvt.startsWith("trigger.sms")) ||
+            (normPat.contains("unlock") && normEvt == "trigger.pin_unlock") ||
+            (normPat.contains("shake") && normEvt == "trigger.shake") ||
+            (normPat.contains("wifi") && normEvt.startsWith("trigger.wifi")) ||
+            (normPat.contains("bluetooth") && normEvt.startsWith("trigger.bt")) ||
+            (normPat.contains("screen") && normEvt.startsWith("trigger.screen"))
+        if (!idMatched) return false
+        val p = patternParam.trim().lowercase()
+        return p.isEmpty() || event.summary.lowercase().contains(p) || event.category.lowercase().contains(p)
     }
 
     fun pushEvent(triggerTypeId: String, category: String, summary: String) {

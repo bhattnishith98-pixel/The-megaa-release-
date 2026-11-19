@@ -21,13 +21,22 @@ data class GitCommitRecord(
     val timestampMs: Long
 )
 
+enum class IdeEditorBackend(val label: String) {
+    SORA_AAR("Sora AAR"),
+    VSCODROID_AAR("VSCodroid AAR"),
+    COMPOSE("Compose")
+}
+
 data class IdeEditorConfig(
     val fontSizeSp: Int = 12,
     val wordWrap: Boolean = true,
     val tabSpaces: Int = 4,
     val autoSave: Boolean = true,
-    val useSoraAar: Boolean = true
-)
+    val backend: IdeEditorBackend = IdeEditorBackend.SORA_AAR
+) {
+    val useSoraAar: Boolean get() = backend == IdeEditorBackend.SORA_AAR
+    val useVscodroidAar: Boolean get() = backend == IdeEditorBackend.VSCODROID_AAR
+}
 
 object IdeAdvancedModulesEngine {
 

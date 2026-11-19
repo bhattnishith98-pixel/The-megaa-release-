@@ -73,11 +73,16 @@ fun StudioDashboardScreen(
     val monetizationState by vm.monetization.state.collectAsStateWithLifecycle()
     val showFirstLaunchPerms by vm.showFirstLaunchPermissionsDialog.collectAsStateWithLifecycle()
     val androidTweaks by vm.androidTweaks.collectAsStateWithLifecycle()
+    val autoTriggerEnabled by vm.autoTriggerEngineEnabled.collectAsStateWithLifecycle()
+    val variables by vm.macroEngine.variables.collectAsStateWithLifecycle()
+    val lastAutoRun by com.example.services.StudioTriggerBus.lastAutoRunSummary.collectAsStateWithLifecycle()
 
     var selectedSection by remember { mutableStateOf("Macros") }
     val privStatus = remember(selectedSection) { vm.inspectPrivilegeStatus() }
     var exampleSearch by remember { mutableStateOf("") }
     var showNewMacroDialog by remember { mutableStateOf(false) }
+    var editingBlocksMacro by remember { mutableStateOf<MacroRecord?>(null) }
+    var showVariablesDialog by remember { mutableStateOf(false) }
 
     val notifPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -362,19 +367,78 @@ fun StudioDashboardScreen(
         when (selectedSection) {
             "Macros" -> {
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SlateCard),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                1.dp,
+                                if (autoTriggerEnabled) EmeraldRun.copy(alpha = 0.55f) else SlateBorder,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .testTag("auto_trigger_engine_card")
                     ) {
-                        Text("Language-Driven Macros", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
-                        FilledTonalButton(
-                            onClick = { showNewMacroDialog = true },
-                            modifier = Modifier.testTag("new_macro_button")
-                        ) {
-                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("New Macro")
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        if (autoTriggerEnabled) "Auto-Trigger Engine · ARMED" else "Auto-Trigger Engine · PAUSED",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = if (autoTriggerEnabled) EmeraldRun else AmberWarn
+                                    )
+                                    Text(
+                                        lastAutoRun ?: "Monitors sensors, battery, unlock, SMS, & hardware; runs actions when constraints pass.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                                Switch(
+                                    checked = autoTriggerEnabled,
+                                    onCheckedChange = { vm.setAutoTriggerEngineEnabled(it) },
+                                    modifier = Modifier.testTag("auto_trigger_master_switch")
+                                )
+                            }
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item {
+                                    FilledTonalButton(
+                                        onClick = {
+                                            editingBlocksMacro = null
+                                            showNewMacroDialog = true
+                                        },
+                                        modifier = Modifier.testTag("new_macro_button")
+                                    ) {
+                                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("New Macro")
+                                    }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = { showVariablesDialog = true },
+                                        modifier = Modifier.testTag("variables_manager_button")
+                                    ) {
+                                        Icon(Icons.Filled.DataObject, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Variables (${variables.size})")
+                                    }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = {
+                                            vm.emitAndDispatchTrigger("trigger.shake", "Sensors", "Simulated Shake Trigger Test")
+                                        },
+                                        modifier = Modifier.testTag("test_auto_trigger_button")
+                                    ) {
+                                        Icon(Icons.Filled.Sensors, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Fire Trigger")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -400,34 +464,73 @@ fun StudioDashboardScreen(
                                     onCheckedChange = { vm.toggleEnabledCompat(macro.id) }
                                 )
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            val res = vm.macroEngine.runMacro(macro)
-                                            vm.setBanner(
-                                                if (res.success) "Macro '${macro.name}' ran (${res.instructionsExecuted} ops, ${res.durationMs}ms)"
-                                                else "Macro '${macro.name}' error: ${res.error}"
-                                            )
-                                        }
-                                    },
-                                    modifier = Modifier.testTag("run_macro_${macro.id}"),
-                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
-                                ) {
-                                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Run")
+                            if (macro.triggers.isNotEmpty() || macro.actionSteps.isNotEmpty() || macro.constraints.isNotEmpty()) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    item {
+                                        AssistChip(
+                                            onClick = { editingBlocksMacro = macro; showNewMacroDialog = true },
+                                            label = { Text("T:${macro.triggers.size}", color = androidx.compose.ui.graphics.Color(0xFFEF9A9A)) }
+                                        )
+                                    }
+                                    item {
+                                        AssistChip(
+                                            onClick = { editingBlocksMacro = macro; showNewMacroDialog = true },
+                                            label = { Text("A:${macro.actionSteps.size}", color = androidx.compose.ui.graphics.Color(0xFF90CAF9)) }
+                                        )
+                                    }
+                                    item {
+                                        AssistChip(
+                                            onClick = { editingBlocksMacro = macro; showNewMacroDialog = true },
+                                            label = { Text("C:${macro.constraints.size} (${macro.constraintGate.name})", color = androidx.compose.ui.graphics.Color(0xFFA5D6A7)) }
+                                        )
+                                    }
                                 }
-                                OutlinedButton(
-                                    onClick = {
-                                        vm.openMacroInEditor(macro)
-                                        onOpenEditor()
-                                    },
-                                    modifier = Modifier.testTag("edit_macro_${macro.id}")
-                                ) {
-                                    Icon(Icons.Outlined.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Edit in Studio")
+                            }
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                item {
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                val res = vm.macroEngine.runMacro(macro)
+                                                vm.setBanner(
+                                                    if (res.success) "Macro '${macro.name}' ran (${res.instructionsExecuted} ops, ${res.durationMs}ms)"
+                                                    else "Macro '${macro.name}' error: ${res.error}"
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("run_macro_${macro.id}"),
+                                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldRun, contentColor = ObsidianBg)
+                                    ) {
+                                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Run")
+                                    }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = {
+                                            editingBlocksMacro = macro
+                                            showNewMacroDialog = true
+                                        },
+                                        modifier = Modifier.testTag("edit_blocks_${macro.id}")
+                                    ) {
+                                        Icon(Icons.Outlined.Widgets, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Blocks")
+                                    }
+                                }
+                                item {
+                                    OutlinedButton(
+                                        onClick = {
+                                            vm.openMacroInEditor(macro)
+                                            onOpenEditor()
+                                        },
+                                        modifier = Modifier.testTag("edit_macro_${macro.id}")
+                                    ) {
+                                        Icon(Icons.Outlined.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Edit in Studio")
+                                    }
                                 }
                             }
                         }
@@ -803,24 +906,19 @@ fun StudioDashboardScreen(
     }
 
     if (showNewMacroDialog) {
-        var name by remember { mutableStateOf("CustomMacro") }
-        var code by remember { mutableStateOf("macro CustomMacro:\n    on manual()\n    do:\n        log.info(\"Running CustomMacro\")") }
-        AlertDialog(
-            onDismissRequest = { showNewMacroDialog = false },
-            title = { Text("Create StudioLang Macro") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true)
-                    OutlinedTextField(value = code, onValueChange = { code = it }, label = { Text("StudioLang Code") }, minLines = 5)
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    vm.macroEngine.upsertMacro(MacroRecord("macro_${System.currentTimeMillis()}", name, "User macro", code))
-                    showNewMacroDialog = false
-                }) { Text("Save") }
-            },
-            dismissButton = { TextButton(onClick = { showNewMacroDialog = false }) { Text("Cancel") } }
+        PdfMacroBuilderDialog(
+            vm = vm,
+            initialMacro = editingBlocksMacro,
+            onDismiss = {
+                showNewMacroDialog = false
+                editingBlocksMacro = null
+            }
+        )
+    }
+    if (showVariablesDialog) {
+        VariablesManagerDialog(
+            vm = vm,
+            onDismiss = { showVariablesDialog = false }
         )
     }
 }

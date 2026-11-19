@@ -1518,6 +1518,15 @@ class UnifiedIdeController(
                 val errs = diags.count { it.severity == "ERROR" }
                 "PASS (${widgets.size} live UI widgets rendered, $errs manifest/lint error(s))"
             }
+            "bridge_vscodroid_aar" -> {
+                val st = com.vscodroid.studio.VscodroidAarRuntime.inspectStatus(listOf(nativeCompilerWorkspaceRoot()))
+                val active = _files.value.firstOrNull { it.path == _activeTabPath.value }
+                val sync = com.vscodroid.studio.VscodroidAarRuntime.buildBufferMetadata(
+                    active?.path ?: "main.py",
+                    active?.content.orEmpty()
+                )
+                "PASS (${st.libraryModule} ${st.toolchains.size} toolchains ready; ${sync.languageId} sha=${sync.sha256Hex.take(8)})"
+            }
             else -> "PASS (Bridge ready)"
         }
         val now = System.currentTimeMillis()

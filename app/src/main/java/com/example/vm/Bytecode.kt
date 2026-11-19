@@ -25,7 +25,7 @@ object Opcode {
     const val STORE_GLOBAL = 5    // A = constPool(text name)
     const val POP = 6
     const val DUP = 7
-    const val UNARY = 8           // A = 0:NEG, 1:NOT
+    const val UNARY = 8           // A = 0:NEG, 1:NOT, 2:BIT_NOT
     const val BINARY = 9          // A = BinaryOp.ordinal
     const val MAKE_LIST = 10      // A = element count
     const val MAKE_MAP = 11       // A = entry count
@@ -33,7 +33,7 @@ object Opcode {
     const val SET_MEMBER = 13     // A = constPool(member name)
     const val GET_INDEX = 14
     const val SET_INDEX = 15
-    const val JUMP = 16           // A = target PC (24-bit in AB)
+    const val JUMP = 16           // AB = target PC
     const val JUMP_IF_FALSE = 17  // AB = target PC
     const val JUMP_IF_TRUE = 18   // AB = target PC
     const val CALL_FUNC = 19      // A = funcIndex, B = argCount
@@ -48,6 +48,15 @@ object Opcode {
     const val TIMEOUT_BEGIN = 28
     const val TIMEOUT_END = 29
 
+    // Extended Python & OOP opcodes
+    const val MAKE_TUPLE = 30     // A = element count
+    const val MAKE_SET = 31       // A = element count
+    const val SLICE_GET = 32      // pops step, stop, start, target
+    const val DEL_INDEX = 33      // pops key/index, target
+    const val CALL_DYNAMIC = 34   // A = argCount (pops args then callee)
+    const val CALL_METHOD = 35    // A = constPool(methodName), B = argCount (pops args then receiver)
+    const val UNPACK = 36         // A = target count (pops iterable, pushes N items top-down)
+
     fun pack(op: Int, a: Int = 0, b: Int = 0): Int =
         ((op and 0xFF) shl 24) or ((a and 0xFFF) shl 12) or (b and 0xFFF)
 
@@ -60,6 +69,12 @@ object Opcode {
     fun argWide(ins: Int): Int = ins and 0xFFFFFF
 }
 
+data class ClassBytecodeMeta(
+    val name: String,
+    val parentName: String?,
+    val methodFuncIndices: Map<String, Int>
+)
+
 data class FunctionBytecodeMeta(
     val index: Int,
     val name: String,
@@ -69,7 +84,10 @@ data class FunctionBytecodeMeta(
     val paramCount: Int,
     val localCount: Int,
     val localNames: List<String>,
-    val requiredNeeds: Set<StudioCapability>
+    val requiredNeeds: Set<StudioCapability>,
+    val paramNames: List<String> = emptyList(),
+    val hasVarArg: Boolean = false,
+    val hasKwArg: Boolean = false
 )
 
 data class CompiledBytecode(
@@ -81,7 +99,8 @@ data class CompiledBytecode(
     val triggers: List<IrTriggerDef>,
     val requiredCapabilities: Set<StudioCapability>,
     val instructions: IntArray,
-    val lineTable: IntArray
+    val lineTable: IntArray,
+    val classes: List<ClassBytecodeMeta> = emptyList()
 ) {
     fun encodeToBytes(): ByteArray {
         val baos = ByteArrayOutputStream()
@@ -96,7 +115,12 @@ data class CompiledBytecode(
                     is BoolVal -> { out.writeByte(3); out.writeBoolean(c.value) }
                     is DurationVal -> { out.writeByte(4); out.writeLong(c.millis) }
                     NoneVal -> out.writeByte(5)
-                    is CallableVal -> { out.writeByte(6); out.writeInt(c.funcIndex); out.writeUTF(c.name) }
+                    is CallableVal -> {
+                        out.writeByte(6)
+                        out.writeInt(c.funcIndex)
+                        out.writeUTF(c.name)
+                        out.writeBoolean(c.isClass)
+                    }
                     else -> out.writeByte(5)
                 }
             }
@@ -132,7 +156,7 @@ data class CompiledBytecode(
                         2 -> TextVal(inp.readUTF())
                         3 -> BoolVal(inp.readBoolean())
                         4 -> DurationVal(inp.readLong())
-                        6 -> CallableVal(inp.readInt(), inp.readUTF())
+                        6 -> CallableVal(inp.readInt(), inp.readUTF(), isClass = inp.readBoolean())
                         else -> NoneVal
                     }
                 }
@@ -190,9 +214,8 @@ class BytecodeCompiler {
         for (fn in module.functions) {
             val startPc = instructions.size
             val labelToPc = mutableMapOf<Int, Int>()
-            val pendingJumps = mutableListOf<Triple<Int, Int, Int>>() // pc, opcode, labelId
+            val pendingJumps = mutableListOf<Triple<Int, Int, Int>>()
 
-            // First pass: map labels & emit placeholder jumps
             for (op in fn.ops) {
                 when (op) {
                     is IrLabel -> labelToPc[op.id] = instructions.size
@@ -203,14 +226,26 @@ class BytecodeCompiler {
                     is IrStoreGlobal -> emit(instructions, lines, Opcode.pack(Opcode.STORE_GLOBAL, constIdx(TextVal(op.name))), op.line)
                     is IrPop -> emit(instructions, lines, Opcode.pack(Opcode.POP), op.line)
                     is IrDup -> emit(instructions, lines, Opcode.pack(Opcode.DUP), op.line)
-                    is IrUnary -> emit(instructions, lines, Opcode.pack(Opcode.UNARY, if (op.op == UnaryOp.NEG) 0 else 1), op.line)
+                    is IrUnary -> {
+                        val uCode = when (op.op) {
+                            UnaryOp.NEG -> 0
+                            UnaryOp.NOT -> 1
+                            UnaryOp.BIT_NOT -> 2
+                        }
+                        emit(instructions, lines, Opcode.pack(Opcode.UNARY, uCode), op.line)
+                    }
                     is IrBinary -> emit(instructions, lines, Opcode.pack(Opcode.BINARY, op.op.ordinal), op.line)
                     is IrMakeList -> emit(instructions, lines, Opcode.pack(Opcode.MAKE_LIST, op.count), op.line)
+                    is IrMakeTuple -> emit(instructions, lines, Opcode.pack(Opcode.MAKE_TUPLE, op.count), op.line)
+                    is IrMakeSet -> emit(instructions, lines, Opcode.pack(Opcode.MAKE_SET, op.count), op.line)
                     is IrMakeMap -> emit(instructions, lines, Opcode.pack(Opcode.MAKE_MAP, op.entryCount), op.line)
                     is IrGetMember -> emit(instructions, lines, Opcode.pack(Opcode.GET_MEMBER, constIdx(TextVal(op.member))), op.line)
                     is IrSetMember -> emit(instructions, lines, Opcode.pack(Opcode.SET_MEMBER, constIdx(TextVal(op.member))), op.line)
                     is IrGetIndex -> emit(instructions, lines, Opcode.pack(Opcode.GET_INDEX), op.line)
                     is IrSetIndex -> emit(instructions, lines, Opcode.pack(Opcode.SET_INDEX), op.line)
+                    is IrSliceGet -> emit(instructions, lines, Opcode.pack(Opcode.SLICE_GET), op.line)
+                    is IrDelIndex -> emit(instructions, lines, Opcode.pack(Opcode.DEL_INDEX), op.line)
+                    is IrUnpack -> emit(instructions, lines, Opcode.pack(Opcode.UNPACK, op.count), op.line)
                     is IrJump -> {
                         pendingJumps += Triple(instructions.size, Opcode.JUMP, op.targetLabel)
                         emit(instructions, lines, Opcode.packWide(Opcode.JUMP, 0), op.line)
@@ -225,6 +260,8 @@ class BytecodeCompiler {
                     }
                     is IrCallFunc -> emit(instructions, lines, Opcode.pack(Opcode.CALL_FUNC, op.funcIndex, op.argCount), op.line)
                     is IrCallHost -> emit(instructions, lines, Opcode.pack(Opcode.CALL_HOST, constIdx(TextVal(op.qualifiedName)), op.argCount), op.line)
+                    is IrCallDynamic -> emit(instructions, lines, Opcode.pack(Opcode.CALL_DYNAMIC, op.argCount), op.line)
+                    is IrCallMethod -> emit(instructions, lines, Opcode.pack(Opcode.CALL_METHOD, constIdx(TextVal(op.methodName)), op.argCount), op.line)
                     is IrReturn -> emit(instructions, lines, Opcode.pack(Opcode.RETURN), op.line)
                     is IrTryBegin -> {
                         pendingJumps += Triple(instructions.size, Opcode.TRY_BEGIN, op.catchLabel)
@@ -255,7 +292,10 @@ class BytecodeCompiler {
                 paramCount = fn.params.size,
                 localCount = fn.localNames.size,
                 localNames = fn.localNames,
-                requiredNeeds = fn.requiredNeeds
+                requiredNeeds = fn.requiredNeeds,
+                paramNames = fn.params,
+                hasVarArg = fn.hasVarArg,
+                hasKwArg = fn.hasKwArg
             )
         }
 
@@ -266,7 +306,8 @@ class BytecodeCompiler {
             triggers = module.triggers,
             requiredCapabilities = module.requiredCapabilities,
             instructions = instructions.toIntArray(),
-            lineTable = lines.toIntArray()
+            lineTable = lines.toIntArray(),
+            classes = module.classes
         )
     }
 

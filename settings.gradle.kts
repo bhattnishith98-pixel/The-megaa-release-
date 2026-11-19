@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Automation Studio"
-include(":app", ":android-code-studio")
+include(":app", ":android-code-studio", ":vscodroid")

@@ -129,6 +129,7 @@ fun AutomationStudioRoot(vm: StudioViewModel) {
 
     DisposableEffect(lifecycleOwner, vm) {
         val appCtx = context.applicationContext
+        runCatching { com.example.runtime.HardwareController.ensureSensorsListening(appCtx) }
         val triggerReceiver = runCatching { StudioDeviceTriggerReceiver.register(appCtx) }.getOrNull()
         val godotBridgeReceiver = runCatching {
             GodotBridgeReceiver.register(appCtx) { type, name, payload ->

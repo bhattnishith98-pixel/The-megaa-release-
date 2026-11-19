@@ -10,10 +10,12 @@ sealed interface StudioValue {
         is NumVal -> value != 0.0
         is TextVal -> value.isNotEmpty()
         is ListVal -> items.isNotEmpty()
+        is TupleVal -> items.isNotEmpty()
+        is SetVal -> items.isNotEmpty()
         is MapVal -> entries.isNotEmpty()
         is DurationVal -> millis != 0L
         NoneVal -> false
-        is NamespaceVal, is CallableVal -> true
+        is NamespaceVal, is CallableVal, is ObjectVal -> true
     }
 
     fun asDouble(): Double = when (this) {
@@ -31,9 +33,15 @@ sealed interface StudioValue {
         is DurationVal -> "${millis}ms"
         NoneVal -> "none"
         is ListVal -> "[${items.joinToString(", ") { it.asDisplayString() }}]"
+        is TupleVal -> "(${items.joinToString(", ") { it.asDisplayString() }}${if (items.size == 1) "," else ""})"
+        is SetVal -> "{${items.joinToString(", ") { it.asDisplayString() }}}"
         is MapVal -> "{${entries.entries.joinToString(", ") { "${it.key}: ${it.value.asDisplayString()}" }}}"
-        is NamespaceVal -> "<namespace ${name}>"
-        is CallableVal -> "<fn ${name}>"
+        is NamespaceVal -> "<module '${name}'>"
+        is CallableVal -> if (isClass) "<class '${name}'>" else "<function '${name}'>"
+        is ObjectVal -> {
+            val repr = fields.entries.joinToString(", ") { "${it.key}=${it.value.asDisplayString()}" }
+            "<$className($repr)>"
+        }
     }
 }
 
@@ -63,17 +71,46 @@ class ListVal(val items: MutableList<StudioValue> = mutableListOf()) : StudioVal
     override fun hashCode(): Int = items.hashCode()
 }
 
+class TupleVal(val items: List<StudioValue> = emptyList()) : StudioValue {
+    override val type: StudioType = StudioType.TUPLE
+    override fun equals(other: Any?): Boolean = other is TupleVal && items == other.items
+    override fun hashCode(): Int = items.hashCode()
+}
+
+class SetVal(val items: LinkedHashSet<StudioValue> = linkedSetOf()) : StudioValue {
+    override val type: StudioType = StudioType.SET
+    override fun equals(other: Any?): Boolean = other is SetVal && items == other.items
+    override fun hashCode(): Int = items.hashCode()
+}
+
 class MapVal(val entries: MutableMap<String, StudioValue> = linkedMapOf()) : StudioValue {
     override val type: StudioType = StudioType.MAP
     override fun equals(other: Any?): Boolean = other is MapVal && entries == other.entries
     override fun hashCode(): Int = entries.hashCode()
 }
 
+class ObjectVal(
+    val className: String,
+    val fields: MutableMap<String, StudioValue> = linkedMapOf(),
+    val methods: MutableMap<String, Int> = linkedMapOf()
+) : StudioValue {
+    override val type: StudioType = StudioType.OBJECT
+    override fun equals(other: Any?): Boolean = this === other
+    override fun hashCode(): Int = System.identityHashCode(this)
+}
+
 data class NamespaceVal(val name: String) : StudioValue {
     override val type: StudioType = StudioType.ANY
 }
 
-data class CallableVal(val funcIndex: Int, val name: String) : StudioValue {
+data class CallableVal(
+    val funcIndex: Int,
+    val name: String,
+    val isClass: Boolean = false,
+    val parentName: String? = null,
+    val methods: Map<String, Int> = emptyMap(),
+    val boundSelf: ObjectVal? = null
+) : StudioValue {
     override val type: StudioType = StudioType.ANY
 }
 

@@ -292,6 +292,13 @@ object BinaryHexEmitter {
         Opcode.SLEEP -> "SLEEP"
         Opcode.TIMEOUT_BEGIN -> "TIMEOUT_BEGIN"
         Opcode.TIMEOUT_END -> "TIMEOUT_END"
+        Opcode.MAKE_TUPLE -> "MAKE_TUPLE"
+        Opcode.MAKE_SET -> "MAKE_SET"
+        Opcode.SLICE_GET -> "SLICE_GET"
+        Opcode.DEL_INDEX -> "DEL_INDEX"
+        Opcode.CALL_DYNAMIC -> "CALL_DYNAMIC"
+        Opcode.CALL_METHOD -> "CALL_METHOD"
+        Opcode.UNPACK -> "UNPACK"
         else -> "OP_$op"
     }
 }

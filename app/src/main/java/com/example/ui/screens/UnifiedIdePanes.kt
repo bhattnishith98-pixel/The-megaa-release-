@@ -40,6 +40,10 @@ import com.tom.rv2ide.studio.AcsAarRuntime
 import com.tom.rv2ide.studio.AcsEditorThemeColors
 import com.tom.rv2ide.studio.AcsSoraEditorFactory
 import com.tom.rv2ide.studio.AcsSoraEditorHandle
+import com.vscodroid.studio.VscodroidAarRuntime
+import com.vscodroid.studio.VscodroidEditorOptions
+import com.vscodroid.studio.VscodroidWorkbenchFactory
+import com.vscodroid.studio.VscodroidWorkbenchHandle
 
 @Composable
 fun VsCodeActivityRail(
@@ -573,9 +577,21 @@ fun VsCodeEditorAndTerminalPane(
     val symbolTokens = remember { listOf("{", "}", "(", ")", ":", "=", ".", "_", "->", "\"", "#") }
     val snippets = remember(activeTabPath) { VsCodeEditorFeaturesEngine.snippetsForFile(activeTabPath) }
     val soraAarAvailable = remember { AcsAarRuntime.isSoraEditorAvailable() }
+    val vscodroidAarAvailable = remember { VscodroidAarRuntime.isWebViewAvailable() }
     val useSoraAarNow = editorConfig.useSoraAar && soraAarAvailable
+    val useVscodroidAarNow = editorConfig.useVscodroidAar && vscodroidAarAvailable
     var soraHandle by remember { mutableStateOf<AcsSoraEditorHandle?>(null) }
+    var vscodroidHandle by remember { mutableStateOf<VscodroidWorkbenchHandle?>(null) }
     val currentOnContentChange by rememberUpdatedState(onContentChange)
+    val currentOnRunCommand by rememberUpdatedState(onRunVscodeCommand)
+    val currentOnRunActiveScript by rememberUpdatedState(onRunActiveScript)
+
+    DisposableEffect(Unit) {
+        onDispose {
+            vscodroidHandle?.release()
+            vscodroidHandle = null
+        }
+    }
 
     Column(
         modifier = modifier
@@ -743,6 +759,52 @@ fun VsCodeEditorAndTerminalPane(
                                 theme = acsTheme,
                                 onTextChanged = { updated -> currentOnContentChange(updated) }
                             )
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            } else if (useVscodroidAarNow) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .testTag("vscode_vscodroid_aar_editor")
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            VscodroidWorkbenchFactory.createWorkbench(
+                                context = ctx,
+                                initialContent = activeFile.content,
+                                initialOptions = VscodroidEditorOptions(
+                                    filePath = activeFile.path,
+                                    fontSizePx = editorConfig.fontSizeSp + 1,
+                                    tabSpaces = editorConfig.tabSpaces,
+                                    wordWrap = editorConfig.wordWrap
+                                ),
+                                onTextChanged = { updated -> currentOnContentChange(updated) },
+                                onRunCommand = { cmdId ->
+                                    if (cmdId == "workbench.action.runActive") currentOnRunActiveScript()
+                                    else currentOnRunCommand(cmdId)
+                                }
+                            ).also { handle ->
+                                vscodroidHandle = handle
+                            }.webView
+                        },
+                        update = { _ ->
+                            val opts = VscodroidEditorOptions(
+                                filePath = activeFile.path,
+                                fontSizePx = editorConfig.fontSizeSp + 1,
+                                tabSpaces = editorConfig.tabSpaces,
+                                wordWrap = editorConfig.wordWrap
+                            )
+                            vscodroidHandle?.updateCallback(
+                                onTextChanged = { updated -> currentOnContentChange(updated) },
+                                onRunCommand = { cmdId ->
+                                    if (cmdId == "workbench.action.runActive") currentOnRunActiveScript()
+                                    else currentOnRunCommand(cmdId)
+                                }
+                            )
+                            vscodroidHandle?.syncState(activeFile.content, opts)
                         },
                         modifier = Modifier.fillMaxSize()
                     )

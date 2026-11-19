@@ -1,0 +1,2 @@
+-keep class com.vscodroid.studio.** { *; }
+-keepattributes JavascriptInterface

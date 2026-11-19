@@ -104,7 +104,7 @@ class Godot47IntegrationTest {
         assertTrue(normalized.startsWith("extends CharacterBody2D"))
         assertTrue(normalized.contains("position += Vector2(speed, 0)"))
         assertTrue(normalized.contains("print(\"hi\")"))
-        assertTrue(normalized.contains("func _input(event):"))
+        assertTrue(normalized.contains("func _input(event: InputEvent) -> void:"))
         assertTrue(normalized.contains("AutomationStudioBridge"))
     }
 

@@ -151,8 +151,8 @@ class StudioStdLib(
             }
 
             // ---- JSON ----
-            "json.parse" -> parseJsonToValue(argText(args, 0), line)
-            "json.stringify" -> TextVal(valueToJsonString(args.getOrNull(0) ?: NoneVal))
+            "json.parse", "json.loads" -> parseJsonToValue(argText(args, 0), line)
+            "json.stringify", "json.dumps" -> TextVal(valueToJsonString(args.getOrNull(0) ?: NoneVal))
 
             // ---- TIME ----
             "time.now" -> TextVal(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()))
@@ -636,7 +636,7 @@ class StudioStdLib(
                 BoolVal(runCatching { context.startActivity(i); true }.getOrDefault(false))
             }
 
-            // ---- CATALOG MACRO RUNTIME BRIDGE ----
+            // ---- CATALOG MACRO RUNTIME BRIDGE (REAL HARDWARE & PDF EXECUTION) ----
             "catalog.fire_trigger" -> {
                 val id = argText(args, 0)
                 val label = argText(args, 1)
@@ -651,9 +651,10 @@ class StudioStdLib(
                 val label = argText(args, 1)
                 val target = argText(args, 2)
                 val value = argText(args, 3)
-                logSink("INFO", "[Action] $label ($id): target=$target value=$value")
+                val execResult = executeRealCatalogAction(id, label, target, value, logSink)
+                logSink("INFO", "[Action] $label ($id): target=$target value=$value -> ${execResult.asDisplayString()}")
                 StudioTriggerBus.pushEvent(id, "Actions", "$label: $target=$value")
-                MapVal(linkedMapOf("ok" to BoolVal(true), "id" to TextVal(id), "target" to TextVal(target), "value" to TextVal(value)))
+                execResult
             }
             "catalog.check_condition" -> {
                 val id = argText(args, 0)
@@ -993,7 +994,11 @@ class StudioStdLib(
                 TextVal(reply)
             }
 
-            else -> throw StudioVmException("STD404", "Unknown host API '$qualifiedName'.", line)
+            else -> {
+                PythonStdLibBridge.dispatchOrNull(qualifiedName, args, line, workspaceRoot, logSink)
+                    ?: OsAndHardwareBridge.dispatchOrNull(context, qualifiedName, args, line, workspaceRoot, logSink)
+                    ?: throw StudioVmException("STD404", "Unknown host API '$qualifiedName'.", line)
+            }
         }
     }
 
@@ -1185,12 +1190,97 @@ class StudioStdLib(
         )
     }
 
-    private fun evaluateCatalogPredicate(id: String, param: String, expected: String): BoolVal {
-        val low = id.lowercase()
+    private suspend fun executeRealCatalogAction(
+        id: String,
+        label: String,
+        target: String,
+        value: String,
+        logSink: (level: String, message: String) -> Unit
+    ): MapVal {
+        val low = "$id $label $target".lowercase(Locale.US)
+        val desiredOn = value.lowercase(Locale.US) in setOf("true", "on", "1", "enable", "yes", "")
+        var detail = value
         val ok = when {
-            low.contains("battery_above") || low.contains("batt_gte") -> readBatteryLevel() >= (expected.toIntOrNull() ?: 20)
-            low.contains("battery_below") || low.contains("batt_lte") -> readBatteryLevel() <= (expected.toIntOrNull() ?: 20)
-            low.contains("charging") -> readIsCharging()
+            low.contains("torch") || low.contains("flash") -> {
+                HardwareController.setTorch(context, desiredOn)
+            }
+            low.contains("vibrate") -> {
+                val ms = value.toLongOrNull()?.coerceIn(20L, 3000L) ?: 180L
+                vibrateDevice(ms); true
+            }
+            low.contains("speakerphone") -> HardwareController.setSpeakerphone(context, desiredOn)
+            low.contains("mute") && low.contains("mic") -> HardwareController.setMicMute(context, desiredOn)
+            low.contains("dnd") || low.contains("do_not_disturb") -> {
+                AndroidCustomizer.setDndEnabled(context, desiredOn).ok
+            }
+            low.contains("volume") -> {
+                val pct = value.toIntOrNull() ?: 60
+                val newPct = HardwareController.setVolumePercent(context, target.ifBlank { "media" }, pct)
+                detail = "${newPct}%"
+                newPct >= 0
+            }
+            low.contains("brightness") -> {
+                AndroidCustomizer.setStandardBrightness(context, value.toIntOrNull() ?: 128)
+            }
+            low.contains("wifi") -> AndroidCustomizer.setWifiEnabled(context, desiredOn).ok
+            low.contains("bluetooth") -> AndroidCustomizer.setBluetoothEnabled(context, desiredOn).ok
+            low.contains("airplane") -> AndroidCustomizer.setAirplaneMode(context, desiredOn).ok
+            low.contains("auto_rotate") || low.contains("rotation") -> AndroidCustomizer.setAutoRotate(context, desiredOn).ok
+            low.contains("screen_off") || low.contains("lock_screen") -> AndroidCustomizer.performPowerAction(context, "lock").ok
+            low.contains("reboot") || low.contains("shutdown") -> AndroidCustomizer.performPowerAction(context, value.ifBlank { "reboot" }).ok
+            low.contains("stopwatch_start") || (low.contains("stopwatch") && low.contains("start")) -> {
+                CustomOsKernel.startStopwatch(value.ifBlank { "default" }); true
+            }
+            low.contains("stopwatch_stop") -> {
+                detail = "${CustomOsKernel.stopStopwatch(value.ifBlank { "default" })}ms"; true
+            }
+            low.contains("stopwatch_reset") -> {
+                CustomOsKernel.resetStopwatch(value.ifBlank { "default" }); true
+            }
+            low.contains("clipboard") -> {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("Automation Studio", value))
+                cm != null
+            }
+            low.contains("speak") || low.contains("voice") -> {
+                voiceSpeakCallback?.invoke(value.ifBlank { label })
+                true
+            }
+            low.contains("beep") || low.contains("sound") -> {
+                OsAndHardwareBridge.dispatchOrNull(context, "audio.beep", listOf(NumVal(160.0)), 1, workspaceRoot, logSink)
+                true
+            }
+            low.contains("notify") || low.contains("notification") -> {
+                runCatching { showNotification(label.ifBlank { "Macro" }, value.ifBlank { target }, 1); true }.getOrDefault(false)
+            }
+            low.contains("kernel_bench") -> {
+                detail = CustomOsKernel.benchCpu(10_000).toString()
+                true
+            }
+            else -> true
+        }
+        return MapVal(linkedMapOf(
+            "ok" to BoolVal(ok),
+            "id" to TextVal(id),
+            "target" to TextVal(target),
+            "value" to TextVal(detail)
+        ))
+    }
+
+    private fun evaluateCatalogPredicate(id: String, param: String, expected: String): BoolVal {
+        val low = id.lowercase(Locale.US)
+        val ok = when {
+            low.contains("battery_above") || low.contains("batt_gte") || low.contains("battery_level_gt") ->
+                readBatteryLevel() >= (expected.toIntOrNull() ?: 20)
+            low.contains("battery_below") || low.contains("batt_lte") || low.contains("battery_level_lt") ->
+                readBatteryLevel() <= (expected.toIntOrNull() ?: 20)
+            low.contains("battery_temp") -> {
+                val temp = (HardwareController.batteryInfo(context)["temperature_c"] as? Double) ?: 30.0
+                temp >= (expected.toDoubleOrNull() ?: 38.0)
+            }
+            low.contains("power_save") || low.contains("battery_saver") -> HardwareController.isPowerSaveMode(context)
+            low.contains("charging") || low.contains("power_connected") -> readIsCharging()
+            low.contains("discharging") -> !readIsCharging()
             low.contains("wifi") -> isNetworkConnected(wifiOnly = true)
             low.contains("network") || low.contains("online") || low.contains("internet") -> isNetworkConnected(wifiOnly = false)
             low.contains("device_locked") || low.contains("keyguard_locked") -> StudioTriggerBus.isDeviceLocked(context)
@@ -1198,6 +1288,27 @@ class StudioStdLib(
             low.contains("pin_secure") -> StudioTriggerBus.isKeyguardSecure(context)
             low.contains("screen_on") -> StudioTriggerBus.screenOn.value
             low.contains("screen_off") -> !StudioTriggerBus.screenOn.value
+            low.contains("dark_theme") -> HardwareController.isDarkTheme(context)
+            low.contains("torch_on") -> HardwareController.isTorchKnownOn()
+            low.contains("headphone") || low.contains("headset") -> HardwareController.isHeadsetConnected(context)
+            low.contains("music_active") -> HardwareController.isMusicActive(context)
+            low.contains("ringer_silent") -> HardwareController.getRingerMode(context) == "silent"
+            low.contains("ringer_vibrate") -> HardwareController.getRingerMode(context) == "vibrate"
+            low.contains("ringer_normal") -> HardwareController.getRingerMode(context) == "normal"
+            low.contains("face_down") -> HardwareController.isFaceDown(context)
+            low.contains("face_up") -> HardwareController.isFaceUp(context)
+            low.contains("light_lux") -> {
+                val lux = HardwareController.lightLux(context)
+                lux >= 0 && lux <= (expected.toDoubleOrNull() ?: 50.0)
+            }
+            low.contains("proximity_near") -> {
+                val prox = HardwareController.proximityCm(context)
+                prox in 0.0..4.9
+            }
+            low.contains("stopwatch") -> {
+                val elapsed = CustomOsKernel.elapsedStopwatchMs(param.ifBlank { "default" })
+                elapsed >= (expected.toLongOrNull() ?: 1000L)
+            }
             low.contains("sms_otp") -> StudioTriggerBus.lastSms.value.otpCode.isNotEmpty()
             low.contains("sms_") -> {
                 val s = StudioTriggerBus.lastSms.value

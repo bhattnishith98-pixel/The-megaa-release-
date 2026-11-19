@@ -137,6 +137,8 @@ dependencies {
   coreLibraryDesugaring(libs.desugar.jdk.libs)
   // Android Code Studio AAR library module (with Sora CodeEditor AAR + AAPT2/XML inflater)
   implementation(project(":android-code-studio"))
+  // VSCodroid AAR library module (offline Code-OSS workbench + Node/Python/Clang/JDK toolchains)
+  implementation(project(":vscodroid"))
   // Any custom .aar or .jar dropped into app/libs/
   implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
   // Official Godot Android AAR. The tools artifact is the editor-enabled build.

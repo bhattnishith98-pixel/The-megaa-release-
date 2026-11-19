@@ -82,7 +82,7 @@ object StudioHighlighter {
                     }
                     i = j
                 }
-                c in "+-*/%=<>!:,.()[]{}" -> {
+                c in "+-*/%=<>!:,.()[]{}&|^~;" -> {
                     withStyle(SpanStyle(color = colorOperator)) { append(c) }
                     i++
                 }

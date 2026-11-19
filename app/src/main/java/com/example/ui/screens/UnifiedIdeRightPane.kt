@@ -35,6 +35,8 @@ import com.example.appbuilder.AppDesign
 import com.example.ide.*
 import com.example.ui.theme.*
 import com.tom.rv2ide.studio.AcsAarRuntime
+import com.vscodroid.studio.VscodroidAarRuntime
+import com.vscodroid.studio.VscodroidAarStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -554,6 +556,11 @@ private fun AndroidCodeStudioLivePane(
                 AcsAarRuntime.inspectStatus(listOf(ide.nativeCompilerWorkspaceRoot()))
             }
         }
+        val vscodroidStatus by produceState<VscodroidAarStatus?>(initialValue = null, files.size) {
+            value = withContext(Dispatchers.IO) {
+                VscodroidAarRuntime.inspectStatus(listOf(ide.nativeCompilerWorkspaceRoot()))
+            }
+        }
         Card(
             colors = CardDefaults.cardColors(containerColor = ObsidianBg),
             modifier = Modifier
@@ -574,8 +581,12 @@ private fun AndroidCodeStudioLivePane(
                     )
                     FilterChip(
                         selected = editorConfig.useSoraAar,
-                        onClick = { ide.updateEditorConfig { it.copy(useSoraAar = !it.useSoraAar) } },
-                        label = { Text(if (editorConfig.useSoraAar) "Sora AAR ON" else "Compose Mode", style = MaterialTheme.typography.labelSmall) },
+                        onClick = {
+                            ide.updateEditorConfig {
+                                it.copy(backend = if (it.useSoraAar) IdeEditorBackend.COMPOSE else IdeEditorBackend.SORA_AAR)
+                            }
+                        },
+                        label = { Text(if (editorConfig.useSoraAar) "Sora AAR ON" else "Use Sora AAR", style = MaterialTheme.typography.labelSmall) },
                         modifier = Modifier.testTag("acs_panel_sora_toggle")
                     )
                 }
@@ -596,6 +607,47 @@ private fun AndroidCodeStudioLivePane(
                         color = CyberCyan
                     )
                 }
+            }
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = ObsidianBg),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, NeonViolet.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                .testTag("vscodroid_aar_status_card")
+        ) {
+            Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "VSCodroid Code-OSS AAR",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NeonViolet
+                    )
+                    FilterChip(
+                        selected = editorConfig.useVscodroidAar,
+                        onClick = {
+                            ide.updateEditorConfig {
+                                it.copy(backend = if (it.useVscodroidAar) IdeEditorBackend.SORA_AAR else IdeEditorBackend.VSCODROID_AAR)
+                            }
+                        },
+                        label = { Text(if (editorConfig.useVscodroidAar) "VSCodroid ON" else "Use VSCodroid", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("vscodroid_panel_toggle")
+                    )
+                }
+                val vst = vscodroidStatus
+                Text(
+                    if (vst != null) {
+                        "Module ${vst.libraryModule} · ${vst.upstreamVersion} · ${vst.toolchains.size} Toolchains · WebView=${vst.webViewCodeOssReady}"
+                    } else {
+                        "Inspecting :vscodroid AAR..."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
             }
         }
 

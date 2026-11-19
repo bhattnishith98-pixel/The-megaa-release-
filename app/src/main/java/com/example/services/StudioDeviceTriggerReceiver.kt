@@ -33,8 +33,16 @@ class StudioDeviceTriggerReceiver : BroadcastReceiver() {
                 val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
                 val pct = if (level >= 0) (level * 100) / scale else 100
                 val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-                val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-                StudioTriggerBus.recordBatteryState(pct, charging)
+                val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                val tempC = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 300) / 10.0
+                val source = when (plugged) {
+                    BatteryManager.BATTERY_PLUGGED_AC -> "ac"
+                    BatteryManager.BATTERY_PLUGGED_USB -> "usb"
+                    BatteryManager.BATTERY_PLUGGED_WIRELESS -> "wireless"
+                    else -> "battery"
+                }
+                val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL || plugged > 0
+                StudioTriggerBus.recordBatteryState(pct, charging, tempC, source)
             }
             Intent.ACTION_HEADSET_PLUG -> {
                 val state = intent.getIntExtra("state", -1)

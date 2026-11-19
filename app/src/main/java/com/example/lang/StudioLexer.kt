@@ -5,10 +5,11 @@ enum class TokenType {
     IDENTIFIER,
     NUMBER,
     TEXT,
+    F_STRING,
     DURATION,
     COMMENT,
 
-    // Keywords
+    // Core & Automation Keywords
     KW_LET,
     KW_CONST,
     KW_DEF,
@@ -55,17 +56,43 @@ enum class TokenType {
     KW_NOT,
     KW_IS,
 
+    // Python Language Keywords
+    KW_CLASS,
+    KW_LAMBDA,
+    KW_EXCEPT,
+    KW_FINALLY,
+    KW_WITH,
+    KW_MATCH,
+    KW_CASE,
+    KW_PASS,
+    KW_DEL,
+    KW_ASSERT,
+    KW_GLOBAL,
+    KW_IMPORT,
+    KW_FROM,
+    KW_YIELD,
+
     // Operators & delimiters
     PLUS,
     MINUS,
     STAR,
     SLASH,
+    FLOOR_DIV,      // //
     PERCENT,
-    POWER,
+    POWER,          // **
+    AMP,            // &
+    PIPE,           // |
+    CARET,          // ^
+    TILDE,          // ~
+    SHL,            // <<
+    SHR,            // >>
     PLUS_EQ,
     MINUS_EQ,
     STAR_EQ,
     SLASH_EQ,
+    FLOOR_DIV_EQ,   // //=
+    PERCENT_EQ,     // %=
+    POWER_EQ,       // **=
     EQ,
     EQ_EQ,
     BANG_EQ,
@@ -76,6 +103,7 @@ enum class TokenType {
     ARROW,      // ->
     COLON,      // :
     COMMA,      // ,
+    SEMICOLON,  // ;
     DOT,        // .
     LPAREN,     // (
     RPAREN,     // )
@@ -99,9 +127,7 @@ data class Token(
 )
 
 /**
- * Table-driven indentation-sensitive lexer for StudioLang.
- * Keyword mappings live in [KEYWORDS] so keywords can be renamed or localized
- * without rewriting the tokenizer state machine.
+ * Table-driven indentation-sensitive lexer for StudioLang (Python-compatible + automation DSL).
  */
 class StudioLexer(
     private val source: String,
@@ -119,7 +145,6 @@ class StudioLexer(
             val lineNum = lineIdx + 1
             if (rawLine.isEmpty()) continue
 
-            // Check leading whitespace before first non-space char
             var pos = 0
             var spaces = 0
             var hasTab = false
@@ -137,7 +162,6 @@ class StudioLexer(
                 }
             }
 
-            // Skip blank lines or comment-only lines without emitting INDENT/DEDENT
             if (pos >= rawLine.length || rawLine[pos] == '#') {
                 if (pos < rawLine.length && rawLine[pos] == '#') {
                     tokens += Token(
@@ -157,7 +181,6 @@ class StudioLexer(
                     span = SourceSpan(lineNum, 1, pos + 1),
                     hint = "Replace tabs with 4 spaces per indentation level."
                 )
-                // Treat tab as 4 spaces for recovery
                 spaces = rawLine.takeWhile { it == ' ' || it == '\t' }
                     .sumOf { if (it == '\t') LanguageConfig.INDENT_WIDTH else 1 }
             }
@@ -192,10 +215,37 @@ class StudioLexer(
                 }
             }
 
-            // Scan tokens on this line
             var i = pos
             while (i < rawLine.length) {
                 val c = rawLine[i]
+                // Detect Python f-string / r-string / rf-string prefixes
+                val prefixLen = detectStringPrefix(rawLine, i)
+                if (prefixLen > 0) {
+                    val prefix = rawLine.substring(i, i + prefixLen).lowercase()
+                    val isFString = 'f' in prefix
+                    val isRaw = 'r' in prefix
+                    val start = i
+                    i += prefixLen
+                    val (strVal, nextI, closed) = scanString(rawLine, i, lineNum, isRaw)
+                    i = nextI
+                    if (!closed) {
+                        diagnostics += StudioDiagnostic(
+                            code = "LEX004",
+                            severity = DiagnosticSeverity.ERROR,
+                            message = "Unterminated text literal.",
+                            span = SourceSpan(lineNum, start + 1, rawLine.length + 1),
+                            hint = "Add a closing quote character."
+                        )
+                    }
+                    tokens += Token(
+                        if (isFString) TokenType.F_STRING else TokenType.TEXT,
+                        rawLine.substring(start, i),
+                        SourceSpan(lineNum, start + 1, i + 1),
+                        literal = strVal
+                    )
+                    continue
+                }
+
                 when {
                     c == ' ' || c == '\t' -> i++
                     c == '#' -> {
@@ -207,55 +257,53 @@ class StudioLexer(
                         break
                     }
                     c == '"' || c == '\'' -> {
-                        val quote = c
                         val start = i
-                        i++
-                        val sb = StringBuilder()
-                        var closed = false
-                        while (i < rawLine.length) {
-                            val ch = rawLine[i]
-                            if (ch == '\\' && i + 1 < rawLine.length) {
-                                i++
-                                when (rawLine[i]) {
-                                    'n' -> sb.append('\n')
-                                    't' -> sb.append('\t')
-                                    '\\' -> sb.append('\\')
-                                    '"' -> sb.append('"')
-                                    '\'' -> sb.append('\'')
-                                    else -> sb.append(rawLine[i])
-                                }
-                                i++
-                            } else if (ch == quote) {
-                                closed = true
-                                i++
-                                break
-                            } else {
-                                sb.append(ch)
-                                i++
-                            }
-                        }
+                        val (strVal, nextI, closed) = scanString(rawLine, i, lineNum, isRaw = false)
+                        i = nextI
                         if (!closed) {
                             diagnostics += StudioDiagnostic(
                                 code = "LEX004",
                                 severity = DiagnosticSeverity.ERROR,
                                 message = "Unterminated text literal.",
                                 span = SourceSpan(lineNum, start + 1, rawLine.length + 1),
-                                hint = "Add a closing $quote character."
+                                hint = "Add a closing $c character."
                             )
                         }
                         tokens += Token(
                             TokenType.TEXT,
                             rawLine.substring(start, i),
                             SourceSpan(lineNum, start + 1, i + 1),
-                            literal = sb.toString()
+                            literal = strVal
                         )
                     }
                     c.isDigit() -> {
                         val start = i
+                        // Support hex 0x..., binary 0b..., octal 0o...
+                        if (c == '0' && i + 1 < rawLine.length && rawLine[i + 1] in charArrayOf('x', 'X', 'b', 'B', 'o', 'O')) {
+                            val baseChar = rawLine[i + 1].lowercaseChar()
+                            i += 2
+                            val digitsStart = i
+                            while (i < rawLine.length && (rawLine[i].isLetterOrDigit() || rawLine[i] == '_')) i++
+                            val rawDigits = rawLine.substring(digitsStart, i).replace("_", "")
+                            val radix = when (baseChar) {
+                                'x' -> 16
+                                'b' -> 2
+                                else -> 8
+                            }
+                            val parsed = rawDigits.toLongOrNull(radix)?.toDouble() ?: 0.0
+                            tokens += Token(
+                                TokenType.NUMBER,
+                                rawLine.substring(start, i),
+                                SourceSpan(lineNum, start + 1, i + 1),
+                                literal = parsed
+                            )
+                            continue
+                        }
+
                         var hasDot = false
                         while (i < rawLine.length) {
                             val ch = rawLine[i]
-                            if (ch.isDigit()) {
+                            if (ch.isDigit() || ch == '_') {
                                 i++
                             } else if (ch == '.' && !hasDot && i + 1 < rawLine.length && rawLine[i + 1].isDigit()) {
                                 hasDot = true
@@ -264,8 +312,7 @@ class StudioLexer(
                                 break
                             }
                         }
-                        val numText = rawLine.substring(start, i)
-                        // Check duration suffix: ms, s, m, h
+                        val numText = rawLine.substring(start, i).replace("_", "")
                         val suffixStart = i
                         if (i + 1 < rawLine.length && rawLine[i] == 'm' && rawLine[i + 1] == 's' &&
                             (i + 2 >= rawLine.length || !rawLine[i + 2].isLetterOrDigit())
@@ -279,7 +326,7 @@ class StudioLexer(
                                 literal = millis
                             )
                         } else if (i < rawLine.length && rawLine[i] in charArrayOf('s', 'm', 'h') &&
-                            (i + 1 >= rawLine.length || !rawLine[i + 1].isLetterOrDigit() && rawLine[i + 1] != '_')
+                            (i + 1 >= rawLine.length || (!rawLine[i + 1].isLetterOrDigit() && rawLine[i + 1] != '_'))
                         ) {
                             val unit = rawLine[i]
                             i++
@@ -301,7 +348,7 @@ class StudioLexer(
                             val value: Double = numText.toDoubleOrNull() ?: 0.0
                             tokens += Token(
                                 TokenType.NUMBER,
-                                numText,
+                                rawLine.substring(start, i),
                                 SourceSpan(lineNum, start + 1, i + 1),
                                 literal = value
                             )
@@ -322,19 +369,25 @@ class StudioLexer(
                     }
                     else -> {
                         val start = i
-                        val next = if (i + 1 < rawLine.length) rawLine[i + 1] else '\u0000'
-                        val twoChar = "$c$next"
-                        when (twoChar) {
-                            "**" -> { tokens += Token(TokenType.POWER, "**", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "+=" -> { tokens += Token(TokenType.PLUS_EQ, "+=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "-=" -> { tokens += Token(TokenType.MINUS_EQ, "-=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "*=" -> { tokens += Token(TokenType.STAR_EQ, "*=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "/=" -> { tokens += Token(TokenType.SLASH_EQ, "/=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "==" -> { tokens += Token(TokenType.EQ_EQ, "==", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "!=" -> { tokens += Token(TokenType.BANG_EQ, "!=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "<=" -> { tokens += Token(TokenType.LT_EQ, "<=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            ">=" -> { tokens += Token(TokenType.GT_EQ, ">=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
-                            "->" -> { tokens += Token(TokenType.ARROW, "->", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                        val threeChar = if (i + 2 < rawLine.length) rawLine.substring(i, i + 3) else ""
+                        val twoChar = if (i + 1 < rawLine.length) rawLine.substring(i, i + 2) else ""
+                        when {
+                            threeChar == "//=" -> { tokens += Token(TokenType.FLOOR_DIV_EQ, "//=", SourceSpan(lineNum, start + 1, start + 4)); i += 3 }
+                            threeChar == "**=" -> { tokens += Token(TokenType.POWER_EQ, "**=", SourceSpan(lineNum, start + 1, start + 4)); i += 3 }
+                            twoChar == "//" -> { tokens += Token(TokenType.FLOOR_DIV, "//", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "**" -> { tokens += Token(TokenType.POWER, "**", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "<<" -> { tokens += Token(TokenType.SHL, "<<", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == ">>" -> { tokens += Token(TokenType.SHR, ">>", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "+=" -> { tokens += Token(TokenType.PLUS_EQ, "+=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "-=" -> { tokens += Token(TokenType.MINUS_EQ, "-=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "*=" -> { tokens += Token(TokenType.STAR_EQ, "*=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "/=" -> { tokens += Token(TokenType.SLASH_EQ, "/=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "%=" -> { tokens += Token(TokenType.PERCENT_EQ, "%=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "==" -> { tokens += Token(TokenType.EQ_EQ, "==", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "!=" -> { tokens += Token(TokenType.BANG_EQ, "!=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "<=" -> { tokens += Token(TokenType.LT_EQ, "<=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == ">=" -> { tokens += Token(TokenType.GT_EQ, ">=", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
+                            twoChar == "->" -> { tokens += Token(TokenType.ARROW, "->", SourceSpan(lineNum, start + 1, start + 3)); i += 2 }
                             else -> {
                                 val single = SINGLE_CHAR_TOKENS[c]
                                 if (single != null) {
@@ -371,6 +424,69 @@ class StudioLexer(
         return LexResult(tokens, diagnostics)
     }
 
+    private fun detectStringPrefix(line: String, index: Int): Int {
+        if (index + 1 < line.length) {
+            val c0 = line[index].lowercaseChar()
+            val c1 = line[index + 1]
+            if ((c0 == 'f' || c0 == 'r' || c0 == 'b' || c0 == 'u') && (c1 == '"' || c1 == '\'')) {
+                return 1
+            }
+            if (index + 2 < line.length) {
+                val c1l = c1.lowercaseChar()
+                val c2 = line[index + 2]
+                if (((c0 == 'f' && c1l == 'r') || (c0 == 'r' && c1l == 'f')) && (c2 == '"' || c2 == '\'')) {
+                    return 2
+                }
+            }
+        }
+        return 0
+    }
+
+    private fun scanString(line: String, startQuoteIdx: Int, @Suppress("UNUSED_PARAMETER") lineNum: Int, isRaw: Boolean): Triple<String, Int, Boolean> {
+        val quote = line[startQuoteIdx]
+        var i = startQuoteIdx + 1
+        // Triple quote on same line support
+        val isTriple = i + 1 < line.length && line[i] == quote && line[i + 1] == quote
+        if (isTriple) {
+            i += 2
+            val closeIdx = line.indexOf("$quote$quote$quote", i)
+            return if (closeIdx != -1) {
+                Triple(line.substring(i, closeIdx), closeIdx + 3, true)
+            } else {
+                Triple(line.substring(i), line.length, false)
+            }
+        }
+        val sb = StringBuilder()
+        var closed = false
+        while (i < line.length) {
+            val ch = line[i]
+            if (!isRaw && ch == '\\' && i + 1 < line.length) {
+                i++
+                when (line[i]) {
+                    'n' -> sb.append('\n')
+                    't' -> sb.append('\t')
+                    'r' -> sb.append('\r')
+                    '\\' -> sb.append('\\')
+                    '"' -> sb.append('"')
+                    '\'' -> sb.append('\'')
+                    else -> sb.append(line[i])
+                }
+                i++
+            } else if (isRaw && ch == '\\' && i + 1 < line.length && line[i + 1] == quote) {
+                sb.append('\\').append(quote)
+                i += 2
+            } else if (ch == quote) {
+                closed = true
+                i++
+                break
+            } else {
+                sb.append(ch)
+                i++
+            }
+        }
+        return Triple(sb.toString(), i, closed)
+    }
+
     data class LexResult(
         val tokens: List<Token>,
         val diagnostics: List<StudioDiagnostic>
@@ -381,7 +497,10 @@ class StudioLexer(
             "let" to TokenType.KW_LET,
             "const" to TokenType.KW_CONST,
             "def" to TokenType.KW_DEF,
+            "class" to TokenType.KW_CLASS,
+            "lambda" to TokenType.KW_LAMBDA,
             "return" to TokenType.KW_RETURN,
+            "yield" to TokenType.KW_YIELD,
             "if" to TokenType.KW_IF,
             "elif" to TokenType.KW_ELIF,
             "else" to TokenType.KW_ELSE,
@@ -392,7 +511,16 @@ class StudioLexer(
             "times" to TokenType.KW_TIMES,
             "break" to TokenType.KW_BREAK,
             "continue" to TokenType.KW_CONTINUE,
+            "pass" to TokenType.KW_PASS,
+            "del" to TokenType.KW_DEL,
+            "assert" to TokenType.KW_ASSERT,
+            "global" to TokenType.KW_GLOBAL,
             "try" to TokenType.KW_TRY,
+            "except" to TokenType.KW_EXCEPT,
+            "finally" to TokenType.KW_FINALLY,
+            "with" to TokenType.KW_WITH,
+            "match" to TokenType.KW_MATCH,
+            "case" to TokenType.KW_CASE,
             "on" to TokenType.KW_ON,
             "error" to TokenType.KW_ERROR,
             "raise" to TokenType.KW_RAISE,
@@ -400,6 +528,8 @@ class StudioLexer(
             "wait" to TokenType.KW_WAIT,
             "timeout" to TokenType.KW_TIMEOUT,
             "use" to TokenType.KW_USE,
+            "import" to TokenType.KW_IMPORT,
+            "from" to TokenType.KW_FROM,
             "as" to TokenType.KW_AS,
             "needs" to TokenType.KW_NEEDS,
             "confirm" to TokenType.KW_CONFIRM,
@@ -417,8 +547,11 @@ class StudioLexer(
             "only" to TokenType.KW_ONLY,
             "do" to TokenType.KW_DO,
             "true" to TokenType.KW_TRUE,
+            "True" to TokenType.KW_TRUE,
             "false" to TokenType.KW_FALSE,
+            "False" to TokenType.KW_FALSE,
             "none" to TokenType.KW_NONE,
+            "None" to TokenType.KW_NONE,
             "and" to TokenType.KW_AND,
             "or" to TokenType.KW_OR,
             "not" to TokenType.KW_NOT,
@@ -431,11 +564,16 @@ class StudioLexer(
             '*' to TokenType.STAR,
             '/' to TokenType.SLASH,
             '%' to TokenType.PERCENT,
+            '&' to TokenType.AMP,
+            '|' to TokenType.PIPE,
+            '^' to TokenType.CARET,
+            '~' to TokenType.TILDE,
             '=' to TokenType.EQ,
             '<' to TokenType.LT,
             '>' to TokenType.GT,
             ':' to TokenType.COLON,
             ',' to TokenType.COMMA,
+            ';' to TokenType.SEMICOLON,
             '.' to TokenType.DOT,
             '(' to TokenType.LPAREN,
             ')' to TokenType.RPAREN,

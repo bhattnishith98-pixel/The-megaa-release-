@@ -41,7 +41,10 @@ enum class StudioType(val label: String) {
     TEXT("text"),
     BOOL("bool"),
     LIST("list"),
+    TUPLE("tuple"),
+    SET("set"),
     MAP("map"),
+    OBJECT("object"),
     NONE("none"),
     TIME("time"),
     DURATION("duration"),
@@ -53,6 +56,7 @@ enum class StudioType(val label: String) {
         if (this == ANY || other == ANY) return true
         if (this == other) return true
         if (this == TEXT && (other == NUMBER || other == BOOL || other == DURATION || other == TIME)) return false
+        if (this == LIST && (other == TUPLE || other == SET)) return true
         return false
     }
 

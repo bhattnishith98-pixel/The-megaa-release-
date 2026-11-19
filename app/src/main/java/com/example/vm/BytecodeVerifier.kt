@@ -14,6 +14,8 @@ object BytecodeVerifier {
         val diagnostics: List<StudioDiagnostic>
     )
 
+    private val dynamicBuiltins = setOf("py.map", "py.filter", "py.sorted", "py.iter_items", "py.set_add")
+
     fun verify(
         bytecode: CompiledBytecode,
         allowedHostApis: Map<String, StudioAnalyzer.HostFunctionSignature> = StudioAnalyzer.DEFAULT_HOST_SIGNATURES,
@@ -44,6 +46,8 @@ object BytecodeVerifier {
             errors += StudioDiagnostic("VER003", DiagnosticSeverity.ERROR, "Empty bytecode instruction stream.", SourceSpan(1, 1))
             return VerificationResult(false, errors)
         }
+
+        val fnIndices = bytecode.functions.mapTo(HashSet()) { it.index }
 
         for (fn in bytecode.functions) {
             if (fn.startPc < 0 || fn.endPc > bytecode.instructions.size || fn.startPc > fn.endPc) {
@@ -99,9 +103,9 @@ object BytecodeVerifier {
                     }
                     Opcode.POP -> stackDepth--
                     Opcode.DUP -> stackDepth++
-                    Opcode.UNARY -> { /* pops 1, pushes 1 */ }
-                    Opcode.BINARY -> stackDepth-- // pops 2, pushes 1
-                    Opcode.MAKE_LIST -> stackDepth = stackDepth - a + 1
+                    Opcode.UNARY -> Unit
+                    Opcode.BINARY -> stackDepth--
+                    Opcode.MAKE_LIST, Opcode.MAKE_TUPLE, Opcode.MAKE_SET -> stackDepth = stackDepth - a + 1
                     Opcode.MAKE_MAP -> stackDepth = stackDepth - (a * 2) + 1
                     Opcode.GET_MEMBER -> {
                         if (a !in bytecode.constPool.indices) {
@@ -114,8 +118,11 @@ object BytecodeVerifier {
                         }
                         stackDepth -= 2
                     }
-                    Opcode.GET_INDEX -> stackDepth-- // pops 2, pushes 1
+                    Opcode.GET_INDEX -> stackDepth--
                     Opcode.SET_INDEX -> stackDepth -= 3
+                    Opcode.SLICE_GET -> stackDepth -= 3
+                    Opcode.DEL_INDEX -> stackDepth -= 2
+                    Opcode.UNPACK -> stackDepth = stackDepth - 1 + a
                     Opcode.JUMP -> {
                         if (wide < fn.startPc || wide > fn.endPc) {
                             errors += StudioDiagnostic("VER007", DiagnosticSeverity.ERROR, "Jump target $wide out of function bounds.", SourceSpan(line, 1))
@@ -128,16 +135,23 @@ object BytecodeVerifier {
                         stackDepth--
                     }
                     Opcode.CALL_FUNC -> {
-                        if (bytecode.functions.none { it.index == a }) {
+                        if (a !in fnIndices) {
                             errors += StudioDiagnostic("VER008", DiagnosticSeverity.ERROR, "Call to undefined function index $a.", SourceSpan(line, 1))
                         }
                         stackDepth = stackDepth - b + 1
+                    }
+                    Opcode.CALL_DYNAMIC -> stackDepth -= a
+                    Opcode.CALL_METHOD -> {
+                        if (a !in bytecode.constPool.indices) {
+                            errors += StudioDiagnostic("VER005", DiagnosticSeverity.ERROR, "Method name index $a out of bounds.", SourceSpan(line, 1))
+                        }
+                        stackDepth -= b
                     }
                     Opcode.CALL_HOST -> {
                         val nameVal = bytecode.constPool.getOrNull(a) as? TextVal
                         if (nameVal == null) {
                             errors += StudioDiagnostic("VER009", DiagnosticSeverity.ERROR, "Invalid host call name index $a.", SourceSpan(line, 1))
-                        } else {
+                        } else if (nameVal.value !in dynamicBuiltins) {
                             val sig = allowedHostApis[nameVal.value]
                             if (sig == null) {
                                 errors += StudioDiagnostic(

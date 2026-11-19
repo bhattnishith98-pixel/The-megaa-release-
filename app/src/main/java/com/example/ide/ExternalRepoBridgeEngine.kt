@@ -74,6 +74,23 @@ enum class UpstreamRepoKind(
         folderHint = "external_repos/android-code-studio",
         archiveFileName = "android-code-studio-main.zip",
         archiveDownloadUrl = "https://github.com/AndroidCSOfficial/android-code-studio/archive/refs/heads/main.zip"
+    ),
+    VSCODROID(
+        id = "vscodroid",
+        displayName = "VSCodroid (Code-OSS Android)",
+        repoSlug = "rmyndharis/VSCodroid",
+        repoUrl = "https://github.com/rmyndharis/VSCodroid",
+        license = "MIT License",
+        expectedLayers = listOf(
+            "app",
+            "vscodroid",
+            "scripts",
+            "patches",
+            "assets"
+        ),
+        folderHint = "external_repos/vscodroid",
+        archiveFileName = "vscodroid-main.zip",
+        archiveDownloadUrl = "https://github.com/rmyndharis/VSCodroid/archive/refs/heads/main.zip"
     )
 }
 
@@ -184,6 +201,13 @@ object ExternalRepoBridgeEngine {
             sourceLayer = "AndroidCSOfficial/android-code-studio (app + xml-inflater)",
             targetLayer = "AppBuilder + Play-Policy Manifest Audit + APK CI ZIP",
             workflowDescription = "Parses Compose & XML layouts live, validates AndroidManifest.xml Play compliance, and packages exportable Gradle builds."
+        ),
+        RepoBridgeDescriptor(
+            id = "bridge_vscodroid_aar",
+            title = "VSCodroid AAR <-> Code-OSS Workbench & Toolchains",
+            sourceLayer = "rmyndharis/VSCodroid (:vscodroid AAR + Code-OSS WebView)",
+            targetLayer = "StudioVm + Python/Node/Clang/Godot Polyglot Execution",
+            workflowDescription = "Runs the bundled offline Code-OSS WebView editor workbench from :vscodroid and routes scripts to Python, Node, Clang, and StudioVm."
         )
     )
 
@@ -191,6 +215,8 @@ object ExternalRepoBridgeEngine {
         val joined = entryPaths.joinToString("\n").lowercase()
         val hint = nameHint.orEmpty().lowercase()
         return when {
+            joined.contains("vscodroid") || hint.contains("vscodroid") || joined.contains("code-oss") ->
+                UpstreamRepoKind.VSCODROID
             joined.contains("src/vs/workbench") || joined.contains("src/vs/editor") || hint.contains("vscode") ->
                 UpstreamRepoKind.VSCODE
             joined.contains("modules/gdscript") || joined.contains("core/object/") || joined.contains("sconstruct") || hint.contains("godot") ->
@@ -381,6 +407,11 @@ object ExternalRepoBridgeEngine {
                 "android-code-studio-main/xml-inflater/src/main/java/XmlInflater.kt" to "class XmlInflater { fun inflate(xml: String) = xml.isNotBlank() }",
                 "android-code-studio-main/java-completion/src/main/java/JavaCompletion.kt" to "class JavaCompletion { fun suggest(prefix: String) = listOf(\"Button\", \"Text\") }"
             )
+            UpstreamRepoKind.VSCODROID -> listOf(
+                "vscodroid-main/README.md" to "# VSCodroid (rmyndharis/VSCodroid)\nOffline VS Code (Code-OSS) workbench & native toolchains bridged via :vscodroid AAR.",
+                "vscodroid-main/app/build.gradle.kts" to "plugins { id(\"com.android.application\") }\n// Bridged with :vscodroid AAR module",
+                "vscodroid-main/scripts/setup-toolchains.sh" to "#!/usr/bin/env bash\necho 'VSCodroid Node.js + Python + Clang ready'\n"
+            )
         }
         val baos = ByteArrayOutputStream()
         ZipOutputStream(baos).use { zos ->
@@ -485,7 +516,8 @@ object ExternalRepoBridgeEngine {
             first.startsWith("godot-4.") ||
             first == "vscode" ||
             first == "godot" ||
-            first == "android-code-studio"
+            first == "android-code-studio" ||
+            first == "vscodroid"
         ) {
             parts.drop(1).joinToString("/")
         } else {

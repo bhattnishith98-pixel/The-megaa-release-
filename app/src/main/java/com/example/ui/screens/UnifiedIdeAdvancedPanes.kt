@@ -231,9 +231,13 @@ fun EditorQuickActionsHeader(
             }
             item {
                 Text(
-                    if (editorConfig.useSoraAar) "Sora AAR" else "Compose",
+                    editorConfig.backend.label,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (editorConfig.useSoraAar) EmeraldRun else CyberCyan,
+                    color = when (editorConfig.backend) {
+                        IdeEditorBackend.SORA_AAR -> EmeraldRun
+                        IdeEditorBackend.VSCODROID_AAR -> NeonViolet
+                        IdeEditorBackend.COMPOSE -> CyberCyan
+                    },
                     modifier = Modifier
                         .background(SlateCard, RoundedCornerShape(4.dp))
                         .clickable { onToggleSoraAar() }

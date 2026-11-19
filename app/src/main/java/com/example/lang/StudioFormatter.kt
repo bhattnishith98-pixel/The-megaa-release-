@@ -10,7 +10,7 @@ object StudioFormatter {
         if (lex.diagnostics.any { it.severity == DiagnosticSeverity.ERROR } ||
             parse.diagnostics.any { it.severity == DiagnosticSeverity.ERROR }
         ) {
-            return source // Never corrupt source with parse errors
+            return source
         }
         return formatProgram(parse.program)
     }
@@ -20,7 +20,7 @@ object StudioFormatter {
         program.statements.forEachIndexed { idx, stmt ->
             appendStmt(sb, stmt, 0)
             if (idx < program.statements.lastIndex) {
-                val isBlockDef = stmt is FuncDefStmt || stmt is MacroDefStmt ||
+                val isBlockDef = stmt is FuncDefStmt || stmt is ClassDefStmt || stmt is MacroDefStmt ||
                     stmt is TriggerDefStmt || stmt is ActionDefStmt ||
                     stmt is BlockDefStmt || stmt is AppDefStmt || stmt is ScreenDefStmt
                 if (isBlockDef) sb.append('\n')
@@ -35,9 +35,16 @@ object StudioFormatter {
         val pad = indent(level)
         when (stmt) {
             is UseStmt -> {
-                sb.append(pad).append("use ").append(stmt.modulePath.joinToString("."))
-                if (stmt.alias != null) sb.append(" as ").append(stmt.alias)
-                sb.append('\n')
+                if (stmt.importedNames.isNotEmpty()) {
+                    sb.append(pad).append("from ").append(stmt.modulePath.joinToString("."))
+                        .append(" import ")
+                        .append(stmt.importedNames.joinToString(", ") { (n, a) -> if (a != null) "$n as $a" else n })
+                        .append('\n')
+                } else {
+                    sb.append(pad).append("use ").append(stmt.modulePath.joinToString("."))
+                    if (stmt.alias != null) sb.append(" as ").append(stmt.alias)
+                    sb.append('\n')
+                }
             }
             is NeedsStmt -> sb.append(pad).append("needs ").append(stmt.capabilities.joinToString(", ")).append('\n')
             is VarDeclStmt -> {
@@ -52,14 +59,27 @@ object StudioFormatter {
                     AssignOp.SUB -> "-="
                     AssignOp.MUL -> "*="
                     AssignOp.DIV -> "/="
+                    AssignOp.MOD -> "%="
+                    AssignOp.FLOOR_DIV -> "//="
+                    AssignOp.POW -> "**="
                 }
                 sb.append(pad).append(formatExpr(stmt.target)).append(' ').append(opStr)
                     .append(' ').append(formatExpr(stmt.value)).append('\n')
+            }
+            is UnpackAssignStmt -> {
+                sb.append(pad).append(stmt.targets.joinToString(", ")).append(" = ")
+                    .append(formatExpr(stmt.value)).append('\n')
             }
             is FuncDefStmt -> {
                 sb.append(pad).append("def ").append(stmt.name).append('(')
                     .append(formatParams(stmt.params)).append(')')
                 if (stmt.returnType != null) sb.append(" -> ").append(stmt.returnType.label)
+                sb.append(":\n")
+                appendBody(sb, stmt.body, level + 1)
+            }
+            is ClassDefStmt -> {
+                sb.append(pad).append("class ").append(stmt.name)
+                if (stmt.baseClass != null) sb.append('(').append(stmt.baseClass).append(')')
                 sb.append(":\n")
                 appendBody(sb, stmt.body, level + 1)
             }
@@ -141,7 +161,7 @@ object StudioFormatter {
                 }
             }
             is ForStmt -> {
-                sb.append(pad).append("for ").append(stmt.itemName).append(" in ")
+                sb.append(pad).append("for ").append(stmt.targets.joinToString(", ")).append(" in ")
                     .append(formatExpr(stmt.iterable)).append(":\n")
                 appendBody(sb, stmt.body, level + 1)
             }
@@ -153,18 +173,54 @@ object StudioFormatter {
                 sb.append(pad).append("repeat ").append(formatExpr(stmt.countExpr)).append(" times:\n")
                 appendBody(sb, stmt.body, level + 1)
             }
+            is WithStmt -> {
+                sb.append(pad).append("with ").append(formatExpr(stmt.contextExpr))
+                if (stmt.alias != null) sb.append(" as ").append(stmt.alias)
+                sb.append(":\n")
+                appendBody(sb, stmt.body, level + 1)
+            }
+            is MatchStmt -> {
+                sb.append(pad).append("match ").append(formatExpr(stmt.subject)).append(":\n")
+                stmt.cases.forEach { c ->
+                    sb.append(indent(level + 1)).append("case ").append(c.pattern?.let { formatExpr(it) } ?: "_")
+                    if (c.guard != null) sb.append(" if ").append(formatExpr(c.guard))
+                    sb.append(":\n")
+                    appendBody(sb, c.body, level + 2)
+                }
+            }
             is BreakStmt -> sb.append(pad).append("break\n")
             is ContinueStmt -> sb.append(pad).append("continue\n")
+            is PassStmt -> sb.append(pad).append("pass\n")
+            is DelStmt -> sb.append(pad).append("del ").append(formatExpr(stmt.target)).append('\n')
+            is AssertStmt -> {
+                sb.append(pad).append("assert ").append(formatExpr(stmt.condition))
+                if (stmt.messageExpr != null) sb.append(", ").append(formatExpr(stmt.messageExpr))
+                sb.append('\n')
+            }
+            is GlobalDeclStmt -> sb.append(pad).append("global ").append(stmt.names.joinToString(", ")).append('\n')
             is ReturnStmt -> {
                 sb.append(pad).append("return")
+                if (stmt.value != null) sb.append(' ').append(formatExpr(stmt.value))
+                sb.append('\n')
+            }
+            is YieldStmt -> {
+                sb.append(pad).append("yield")
                 if (stmt.value != null) sb.append(' ').append(formatExpr(stmt.value))
                 sb.append('\n')
             }
             is TryStmt -> {
                 sb.append(pad).append("try:\n")
                 appendBody(sb, stmt.tryBody, level + 1)
-                sb.append(pad).append("on error ").append(stmt.errorVar ?: "e").append(":\n")
-                appendBody(sb, stmt.catchBody, level + 1)
+                if (stmt.catchBody.isNotEmpty()) {
+                    sb.append(pad).append("except")
+                    if (stmt.exceptType != null) sb.append(' ').append(stmt.exceptType)
+                    sb.append(" as ").append(stmt.errorVar ?: "e").append(":\n")
+                    appendBody(sb, stmt.catchBody, level + 1)
+                }
+                if (stmt.finallyBody.isNotEmpty()) {
+                    sb.append(pad).append("finally:\n")
+                    appendBody(sb, stmt.finallyBody, level + 1)
+                }
             }
             is RaiseStmt -> sb.append(pad).append("raise ").append(formatExpr(stmt.messageExpr)).append('\n')
             is RetryStmt -> {
@@ -184,7 +240,7 @@ object StudioFormatter {
 
     private fun appendBody(sb: StringBuilder, body: List<Stmt>, level: Int) {
         if (body.isEmpty()) {
-            sb.append(indent(level)).append("none\n")
+            sb.append(indent(level)).append("pass\n")
         } else {
             body.forEach { appendStmt(sb, it, level) }
         }
@@ -193,6 +249,7 @@ object StudioFormatter {
     private fun formatParams(params: List<ParamSpec>): String =
         params.joinToString(", ") { p ->
             buildString {
+                if (p.isKwArg) append("**") else if (p.isVarArg) append("*")
                 append(p.name)
                 if (p.typeHint != null) append(": ").append(p.typeHint.label)
                 if (p.defaultValue != null) append(" = ").append(formatExpr(p.defaultValue))
@@ -208,19 +265,33 @@ object StudioFormatter {
         is NoneLit -> "none"
         is DurationLit -> expr.raw
         is ListLit -> "[${expr.elements.joinToString(", ") { formatExpr(it) }}]"
-        is MapLit -> "{${expr.entries.joinToString(", ") { "${it.key}: ${formatExpr(it.value)}" }}}"
+        is TupleLit -> "(${expr.elements.joinToString(", ") { formatExpr(it) }}${if (expr.elements.size == 1) "," else ""})"
+        is SetLit -> "{${expr.elements.joinToString(", ") { formatExpr(it) }}}"
+        is MapLit -> "{${expr.entries.joinToString(", ") { "${it.keyExpr?.let { k -> formatExpr(k) } ?: "\"${it.key}\""}: ${formatExpr(it.value)}" }}}"
         is VarRef -> expr.name
         is MemberAccess -> "${formatExpr(expr.target)}.${expr.member}"
         is IndexAccess -> "${formatExpr(expr.target)}[${formatExpr(expr.index)}]"
+        is SliceAccess -> "${formatExpr(expr.target)}[${expr.start?.let { formatExpr(it) } ?: ""}:${expr.stop?.let { formatExpr(it) } ?: ""}${if (expr.step != null) ":${formatExpr(expr.step)}" else ""}]"
+        is TernaryExpr -> "${formatExpr(expr.trueExpr)} if ${formatExpr(expr.condition)} else ${formatExpr(expr.falseExpr)}"
+        is LambdaExpr -> "lambda ${formatParams(expr.params)}: ${formatExpr(expr.body)}"
+        is ListCompExpr -> "[${formatExpr(expr.elementExpr)} for ${expr.varNames.joinToString(", ")} in ${formatExpr(expr.iterable)}${if (expr.filterExpr != null) " if ${formatExpr(expr.filterExpr)}" else ""}]"
+        is DictCompExpr -> "{${formatExpr(expr.keyExpr)}: ${formatExpr(expr.valueExpr)} for ${expr.varNames.joinToString(", ")} in ${formatExpr(expr.iterable)}${if (expr.filterExpr != null) " if ${formatExpr(expr.filterExpr)}" else ""}}"
+        is SetCompExpr -> "{${formatExpr(expr.elementExpr)} for ${expr.varNames.joinToString(", ")} in ${formatExpr(expr.iterable)}${if (expr.filterExpr != null) " if ${formatExpr(expr.filterExpr)}" else ""}}"
         is CallExpr -> {
             val args = expr.args.joinToString(", ") { arg ->
-                if (arg.name != null) "${arg.name} = ${formatExpr(arg.value)}" else formatExpr(arg.value)
+                when {
+                    arg.isKwSpread -> "**${formatExpr(arg.value)}"
+                    arg.isSpread -> "*${formatExpr(arg.value)}"
+                    arg.name != null -> "${arg.name} = ${formatExpr(arg.value)}"
+                    else -> formatExpr(arg.value)
+                }
             }
             "${formatExpr(expr.callee)}($args)"
         }
         is UnaryExpr -> when (expr.op) {
             UnaryOp.NEG -> "-${formatExpr(expr.operand)}"
             UnaryOp.NOT -> "not ${formatExpr(expr.operand)}"
+            UnaryOp.BIT_NOT -> "~${formatExpr(expr.operand)}"
         }
         is BinaryExpr -> "${formatExpr(expr.left)} ${expr.op.symbol} ${formatExpr(expr.right)}"
     }

@@ -286,6 +286,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _showNodeQuickStart = MutableStateFlow(true)
     val showNodeQuickStart: StateFlow<Boolean> = _showNodeQuickStart.asStateFlow()
 
+    private val _autoTriggerEngineEnabled = MutableStateFlow(true)
+    val autoTriggerEngineEnabled: StateFlow<Boolean> = _autoTriggerEngineEnabled.asStateFlow()
+
+    @Volatile
+    private var lastProcessedTriggerEventId: String? = null
+
     private var activeVm: StudioVm? = null
     private var executionJob: Job? = null
     private var compileDebounceJob: Job? = null
@@ -304,6 +310,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             _nodeGraph.value = graph
             _compileOutput.value = compiled
         }
+        viewModelScope.launch(Dispatchers.Default) {
+            com.example.services.StudioTriggerBus.recentEvents.collect { events ->
+                if (!_autoTriggerEngineEnabled.value) return@collect
+                val latest = events.firstOrNull() ?: return@collect
+                if (latest.id == lastProcessedTriggerEventId) return@collect
+                lastProcessedTriggerEventId = latest.id
+                val ran = macroEngine.dispatchTriggerEvent(latest)
+                if (ran.isNotEmpty()) {
+                    val summary = ran.joinToString(", ") { (m, r) ->
+                        val skipped = r.logs.any { it.message.contains("skipped:") }
+                        "${m.name}:${if (skipped) "skipped" else if (r.success) "ran" else "err"}"
+                    }
+                    _statusBanner.value = "Auto-Trigger [${latest.triggerTypeId}]: $summary"
+                }
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             _identityReport.value = RuntimeIdentity.verifyAppIdentity(appContext)
             _androidTweaks.value = AndroidCustomizer.readDeviceTweaks(appContext)
@@ -314,6 +336,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         unifiedIde.scanBundledAssetArchives { assetPath -> appContext.assets.open(assetPath) }
         refreshAvailableLibraries()
         refreshInstalledApps()
+    }
+
+    fun setAutoTriggerEngineEnabled(enabled: Boolean) {
+        _autoTriggerEngineEnabled.value = enabled
+        setBanner(if (enabled) "Auto-Trigger Macro Engine ENABLED." else "Auto-Trigger Macro Engine PAUSED.")
+    }
+
+    fun emitAndDispatchTrigger(triggerId: String, category: String, summary: String) {
+        com.example.services.StudioTriggerBus.pushEvent(triggerId, category, summary)
     }
 
     override fun onCleared() {
