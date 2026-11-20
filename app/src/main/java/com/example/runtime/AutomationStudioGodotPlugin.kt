@@ -9,6 +9,7 @@ import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
 import org.godotengine.godot.plugin.SignalInfo
 import org.godotengine.godot.plugin.UsedByGodot
+import java.io.File
 
 /**
  * Official Godot 4.7.2.stable Android [GodotPlugin] registered as `AutomationStudioBridge`.
@@ -16,9 +17,20 @@ import org.godotengine.godot.plugin.UsedByGodot
  *   var bridge = Engine.get_singleton("AutomationStudioBridge")
  *   bridge.logToIde("Player spawned")
  *   bridge.emitStudioEvent("level_clear", "score=100")
+ *   bridge.getLaunchMode() / bridge.readWorkspaceFile("scenes/main.tscn")
  * Events cross process boundaries cleanly via package-scoped Broadcast Intents.
  */
-class AutomationStudioGodotPlugin(godot: Godot) : GodotPlugin(godot) {
+class AutomationStudioGodotPlugin(
+    godot: Godot,
+    private val launchConfigProvider: () -> GodotCommandLineSanitizer.LaunchConfig = {
+        GodotCommandLineSanitizer.LaunchConfig(
+            mode = GodotCommandLineSanitizer.MODE_DEMO_3D,
+            projectPath = "",
+            mainScene = ""
+        )
+    },
+    private val onOpenRuntimeRequested: ((projectPath: String, mainScene: String) -> Unit)? = null
+) : GodotPlugin(godot) {
 
     override fun getPluginName(): String = PLUGIN_NAME
 
@@ -29,6 +41,71 @@ class AutomationStudioGodotPlugin(godot: Godot) : GodotPlugin(godot) {
 
     @UsedByGodot
     fun getEngineVersion(): String = "4.7.2.stable"
+
+    @UsedByGodot
+    fun getLaunchMode(): String = launchConfigProvider().mode
+
+    @UsedByGodot
+    fun getLaunchProjectPath(): String = launchConfigProvider().projectPath
+
+    @UsedByGodot
+    fun getLaunchMainScene(): String = launchConfigProvider().mainScene
+
+    @UsedByGodot
+    fun listWorkspaceFiles(): String {
+        val projectPath = launchConfigProvider().projectPath
+        if (projectPath.isBlank()) return ""
+        val rootDir = File(projectPath)
+        if (!rootDir.isDirectory) return ""
+        val canonicalBase = rootDir.canonicalPath
+        val skipDirs = setOf(".godot", ".import", ".git", "build")
+        val paths = mutableListOf<String>()
+        rootDir.walkTopDown()
+            .onEnter { dir -> dir.name !in skipDirs }
+            .filter { it.isFile }
+            .forEach { file ->
+                val canonical = file.canonicalPath
+                if (canonical.startsWith(canonicalBase + File.separator)) {
+                    val rel = canonical.removePrefix(canonicalBase + File.separator)
+                        .replace('\\', '/')
+                    if (rel.isNotBlank()) paths += rel
+                }
+            }
+        return paths.sorted().joinToString("\n")
+    }
+
+    @UsedByGodot
+    fun readWorkspaceFile(relPath: String): String {
+        val target = resolveSafeWorkspaceFile(launchConfigProvider().projectPath, relPath) ?: return ""
+        if (!target.isFile) return ""
+        return runCatching { target.readText() }.getOrDefault("")
+    }
+
+    @UsedByGodot
+    fun writeWorkspaceFile(relPath: String, content: String): Boolean {
+        val target = resolveSafeWorkspaceFile(launchConfigProvider().projectPath, relPath) ?: return false
+        return runCatching {
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+            sendBridgeBroadcast("workspace_saved", relPath, "${content.length} bytes")
+            true
+        }.getOrDefault(false)
+    }
+
+    @UsedByGodot
+    fun openProjectInRuntime(projectPath: String, mainScene: String) {
+        val targetPath = projectPath.ifBlank { launchConfigProvider().projectPath }
+        val targetScene = mainScene.ifBlank { launchConfigProvider().mainScene }
+        val host = activity
+        val handler = onOpenRuntimeRequested
+        if (handler != null) {
+            if (host != null) {
+                host.runOnUiThread { handler(targetPath, targetScene) }
+            } else {
+                handler(targetPath, targetScene)
+            }
+        }
+    }
 
     @UsedByGodot
     fun logToIde(message: String) {
@@ -69,6 +146,15 @@ class AutomationStudioGodotPlugin(godot: Godot) : GodotPlugin(godot) {
         const val EXTRA_EVENT_TYPE = "event_type"
         const val EXTRA_EVENT_NAME = "event_name"
         const val EXTRA_EVENT_PAYLOAD = "event_payload"
+
+        fun resolveSafeWorkspaceFile(projectPath: String, relPath: String): File? {
+            if (projectPath.isBlank() || relPath.isBlank()) return null
+            val root = runCatching { File(projectPath).canonicalFile }.getOrNull() ?: return null
+            val cleanRel = relPath.removePrefix("res://").trimStart('/', '\\')
+            if (cleanRel.isBlank()) return null
+            val target = runCatching { File(root, cleanRel).canonicalFile }.getOrNull() ?: return null
+            return if (target.path.startsWith(root.path + File.separator)) target else null
+        }
     }
 }
 

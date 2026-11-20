@@ -10,6 +10,8 @@ import com.example.ide.RepoImportMode
 import com.example.ide.ScriptLanguage
 import com.example.ide.UnifiedIdeController
 import com.example.ide.UpstreamRepoKind
+import com.example.runtime.AutomationStudioGodotPlugin
+import com.example.runtime.GodotCommandLineSanitizer
 import com.example.runtime.GodotProjectWorkspace
 import com.example.ui.screens.AiStudioWebPortals
 import com.example.vm.CapabilityManager
@@ -212,6 +214,76 @@ class Godot47IntegrationTest {
         assertTrue("cmd.godot_3d_demo" in ids)
         assertTrue("cmd.godot_sync_disk" in ids)
         assertTrue("cmd.godot_export_zip" in ids)
+    }
+
+    @Test
+    fun godotCommandLineSanitizerStripsUnsupportedSetupAbortFlagsAndPreservesSafeFlags() {
+        val sanitized = GodotCommandLineSanitizer.sanitizeCommandLine(
+            rawArgs = listOf(
+                "--editor",
+                "--project-manager",
+                "--path", "/data/user/0/com.example/files/godot_projects/active_workspace",
+                "--scene", "res://scenes/main.tscn",
+                "--main-pack", "/sdcard/game.pck",
+                "--remote-debug", "tcp://127.0.0.1:6007",
+                "--embedded",
+                "--unknown-flag",
+                "--rendering-driver", "opengl3",
+                "--verbose"
+            ),
+            baseArgs = listOf("--xr-mode", "regular", "--fullscreen")
+        )
+        assertEquals(
+            listOf("--xr-mode", "regular", "--fullscreen", "--rendering-driver", "opengl3", "--verbose"),
+            sanitized
+        )
+        assertFalse("--path" in sanitized)
+        assertFalse("--scene" in sanitized)
+        assertFalse("--editor" in sanitized)
+        assertFalse("--project-manager" in sanitized)
+    }
+
+    @Test
+    fun godotLaunchConfigResolvesWorkspaceEditorProjectManagerAndDemoModes() {
+        val demo = GodotCommandLineSanitizer.extractLaunchConfig()
+        assertEquals(GodotCommandLineSanitizer.MODE_DEMO_3D, demo.mode)
+
+        val ws = GodotCommandLineSanitizer.extractLaunchConfig(
+            intentProjectPath = "/tmp/active_workspace",
+            intentMainScene = "res://scenes/main.tscn"
+        )
+        assertEquals(GodotCommandLineSanitizer.MODE_WORKSPACE, ws.mode)
+        assertEquals("/tmp/active_workspace", ws.projectPath)
+        assertEquals("res://scenes/main.tscn", ws.mainScene)
+
+        val editor = GodotCommandLineSanitizer.extractLaunchConfig(
+            cliArgs = listOf("--editor", "--path", "/tmp/my_proj")
+        )
+        assertEquals(GodotCommandLineSanitizer.MODE_EDITOR, editor.mode)
+        assertEquals("/tmp/my_proj", editor.projectPath)
+
+        val pm = GodotCommandLineSanitizer.extractLaunchConfig(openProjectManager = true)
+        assertEquals(GodotCommandLineSanitizer.MODE_PROJECT_MANAGER, pm.mode)
+    }
+
+    @Test
+    fun workspaceBridgeRejectsPathTraversalAndResolvesSafeChildren() {
+        val tempRoot = Files.createTempDirectory("godot_bridge_path_test").toFile()
+        try {
+            val safe = AutomationStudioGodotPlugin.resolveSafeWorkspaceFile(
+                tempRoot.absolutePath,
+                "res://scenes/main.tscn"
+            )
+            assertTrue(safe != null && safe.canonicalPath.endsWith("scenes${File.separator}main.tscn"))
+
+            val traversal = AutomationStudioGodotPlugin.resolveSafeWorkspaceFile(
+                tempRoot.absolutePath,
+                "../../etc/passwd"
+            )
+            assertEquals(null, traversal)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
     }
 }
 

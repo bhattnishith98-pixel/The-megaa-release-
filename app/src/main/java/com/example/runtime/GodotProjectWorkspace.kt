@@ -9,6 +9,212 @@ import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
+object GodotCommandLineSanitizer {
+    const val MODE_DEMO_3D = "demo_3d"
+    const val MODE_WORKSPACE = "workspace"
+    const val MODE_EDITOR = "editor"
+    const val MODE_PROJECT_MANAGER = "project_manager"
+
+    data class LaunchConfig(
+        val mode: String,
+        val projectPath: String,
+        val mainScene: String
+    )
+
+    private val DISALLOWED_VALUE_FLAGS = setOf(
+        "--path",
+        "--scene",
+        "--main-pack",
+        "--remote-debug",
+        "--remote-fs",
+        "--remote-fs-password",
+        "--editor-scene",
+        "--export-release",
+        "--export-debug",
+        "--export-pack",
+        "--doctool",
+        "--test",
+        "--import"
+    )
+
+    private val DISALLOWED_SOLO_FLAGS = setOf(
+        "--editor",
+        "-e",
+        "--project-manager",
+        "-p",
+        "--embedded",
+        "--no-window"
+    )
+
+    private val SAFE_VALUE_FLAGS = setOf(
+        "--xr-mode",
+        "--background_color",
+        "--benchmark-file",
+        "--audio-driver",
+        "--audio-output-latency",
+        "--text-driver",
+        "--display-driver",
+        "--rendering-method",
+        "--rendering-driver",
+        "--gpu-index",
+        "--tablet-driver",
+        "--accessibility-driver",
+        "--resolution",
+        "--screen",
+        "--position",
+        "--log-file",
+        "--language",
+        "-l",
+        "--render-thread",
+        "--quit-after",
+        "--max-fps",
+        "--frame-delay",
+        "--time-scale",
+        "--fixed-fps",
+        "--wid"
+    )
+
+    private val SAFE_SOLO_FLAGS = setOf(
+        "--debug_opengl",
+        "--edge_to_edge",
+        "--fullscreen",
+        "-f",
+        "--disable_godot_splash",
+        "--benchmark",
+        "--verbose",
+        "-v",
+        "--quiet",
+        "-q",
+        "--no-header",
+        "--maximized",
+        "-m",
+        "--windowed",
+        "-w",
+        "--gpu-validation",
+        "--delta-smoothing",
+        "--single-window",
+        "--accessibility",
+        "--always-on-top",
+        "-t",
+        "--headless",
+        "--profiling",
+        "--quit",
+        "--disable-render-loop",
+        "--disable-vsync",
+        "--print-fps",
+        "--gpu-profile",
+        "--disable-crash-handler",
+        "--skip-breakpoints",
+        "--ignore-error-breaks"
+    )
+
+    /**
+     * Filters command-line args down to flags supported by Godot 4.7.2.stable's bundled
+     * Android runtime (`libgodot_android.so` compiled with `disable_path_overrides=yes` and
+     * without desktop CLI editor flags). Passing `--path`, `--scene`, `--editor`, or
+     * `--project-manager` causes `Main::setup()` to abort with
+     * `Unable to setup the Godot engine! Aborting...`.
+     */
+    fun sanitizeCommandLine(
+        rawArgs: List<String>,
+        baseArgs: List<String> = emptyList()
+    ): List<String> {
+        val combined = baseArgs + rawArgs
+        val result = mutableListOf<String>()
+        var i = 0
+        while (i < combined.size) {
+            val arg = combined[i]
+            when {
+                arg in DISALLOWED_VALUE_FLAGS -> {
+                    i += if (i + 1 < combined.size && !combined[i + 1].startsWith("-")) 2 else 1
+                }
+                DISALLOWED_VALUE_FLAGS.any { arg.startsWith("$it=") } -> {
+                    i += 1
+                }
+                arg in DISALLOWED_SOLO_FLAGS -> {
+                    i += 1
+                }
+                arg in SAFE_VALUE_FLAGS -> {
+                    if (i + 1 < combined.size) {
+                        result += arg
+                        result += combined[i + 1]
+                        i += 2
+                    } else {
+                        i += 1
+                    }
+                }
+                arg in SAFE_SOLO_FLAGS -> {
+                    result += arg
+                    i += 1
+                }
+                else -> {
+                    i += 1
+                }
+            }
+        }
+        return result
+    }
+
+    fun extractLaunchConfig(
+        intentProjectPath: String? = null,
+        intentMainScene: String? = null,
+        openProjectManager: Boolean = false,
+        isEditor: Boolean = false,
+        cliArgs: List<String> = emptyList()
+    ): LaunchConfig {
+        var resolvedPath = intentProjectPath.orEmpty().trim()
+        var resolvedScene = intentMainScene.orEmpty().trim()
+        var cliEditor = isEditor
+        var cliPm = openProjectManager
+
+        var i = 0
+        while (i < cliArgs.size) {
+            when (val arg = cliArgs[i]) {
+                "--path" -> if (i + 1 < cliArgs.size && resolvedPath.isBlank()) {
+                    resolvedPath = cliArgs[i + 1].trim()
+                    i += 2
+                } else {
+                    i += 1
+                }
+                "--scene" -> if (i + 1 < cliArgs.size && resolvedScene.isBlank()) {
+                    resolvedScene = cliArgs[i + 1].trim()
+                    i += 2
+                } else {
+                    i += 1
+                }
+                "--editor", "-e" -> {
+                    cliEditor = true
+                    i += 1
+                }
+                "--project-manager", "-p" -> {
+                    cliPm = true
+                    i += 1
+                }
+                else -> {
+                    if (arg.startsWith("--path=") && resolvedPath.isBlank()) {
+                        resolvedPath = arg.substringAfter("--path=").trim()
+                    } else if (arg.startsWith("--scene=") && resolvedScene.isBlank()) {
+                        resolvedScene = arg.substringAfter("--scene=").trim()
+                    }
+                    i += 1
+                }
+            }
+        }
+
+        val mode = when {
+            cliPm -> MODE_PROJECT_MANAGER
+            cliEditor -> MODE_EDITOR
+            resolvedPath.isNotBlank() -> MODE_WORKSPACE
+            else -> MODE_DEMO_3D
+        }
+        return LaunchConfig(
+            mode = mode,
+            projectPath = resolvedPath,
+            mainScene = resolvedScene
+        )
+    }
+}
+
 /**
  * Synchronizes Automation Studio's IDE workspace (project.godot, .tscn scenes, .gd scripts)
  * to a real writable Godot 4.7.2.stable project directory on disk so both
@@ -22,13 +228,27 @@ object GodotProjectWorkspace {
         val writtenFilesCount: Int
     )
 
-    private const val WORKSPACE_FOLDER = "godot_projects/active_workspace"
+    private const val PROJECTS_ROOT_FOLDER = "godot_projects"
+    private const val WORKSPACE_FOLDER = "$PROJECTS_ROOT_FOLDER/active_workspace"
     private val SKIP_IMPORT_DIRS = setOf(".godot", ".import", "build", ".git")
     private val IMPORTABLE_EXTENSIONS = setOf("godot", "tscn", "tres", "gd", "gdshader", "cfg", "md", "txt")
     private const val MAX_IMPORT_BYTES = 128 * 1024L
 
+    fun projectsRootDir(context: Context): File =
+        File(context.filesDir, PROJECTS_ROOT_FOLDER).apply { mkdirs() }
+
     fun activeProjectDir(context: Context): File =
         File(context.filesDir, WORKSPACE_FOLDER).apply { mkdirs() }
+
+    fun listProjectDirs(context: Context): List<File> {
+        val active = activeProjectDir(context)
+        val root = projectsRootDir(context)
+        val dirs = root.listFiles()
+            ?.filter { it.isDirectory && !it.name.startsWith(".") }
+            ?.sortedBy { if (it.name == active.name) "" else it.name.lowercase() }
+            ?: listOf(active)
+        return dirs.ifEmpty { listOf(active) }
+    }
 
     fun defaultProjectGodot(appName: String = "Automation Studio Project"): String = """
         |; Engine configuration file.

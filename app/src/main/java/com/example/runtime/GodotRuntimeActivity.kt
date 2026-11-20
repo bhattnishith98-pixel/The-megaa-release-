@@ -28,10 +28,18 @@ import kotlin.system.exitProcess
  * Hosts the official Godot 4.7.2.stable runtime via [GodotFragment].
  * Runs in an isolated `:godot_runtime` process so native engine lifecycles
  * never conflict with [GodotEditorActivity] or kill the main IDE process.
+ *
+ * Note: The bundled `libgodot_android.so` inside `godot-tools:4.7.2.stable` was
+ * compiled with `disable_path_overrides=yes`, so passing `--path`, `--scene`,
+ * `--editor`, or `--project-manager` on the native CLI aborts `Main::setup()`.
+ * All native CLI arguments are sanitized via [GodotCommandLineSanitizer] while
+ * workspace metadata and files are supplied to GDScript through [AutomationStudioGodotPlugin].
  */
 class GodotRuntimeActivity : FragmentActivity(), GodotHost {
     private var godotFragment: GodotFragment? = null
     private var bridgePlugin: AutomationStudioGodotPlugin? = null
+    private var badgeView: TextView? = null
+    private var editButton: Button? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +62,7 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
         root.addView(container)
         root.addView(buildFloatingIdeOverlay())
         setContentView(root)
+        refreshOverlayState()
 
         val existing = supportFragmentManager.findFragmentById(R.id.godot_runtime_container)
         if (existing is GodotFragment) {
@@ -66,17 +75,41 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        refreshOverlayState()
+        bridgePlugin?.dispatchIdeCommand("reload_workspace")
+    }
+
+    private fun currentLaunchConfig(): GodotCommandLineSanitizer.LaunchConfig =
+        GodotCommandLineSanitizer.extractLaunchConfig(
+            intentProjectPath = intent?.getStringExtra(EXTRA_PROJECT_PATH),
+            intentMainScene = intent?.getStringExtra(EXTRA_MAIN_SCENE),
+            cliArgs = intent?.getStringArrayListExtra(EXTRA_CLI_ARGS).orEmpty()
+        )
+
+    private fun refreshOverlayState() {
+        val cfg = currentLaunchConfig()
+        badgeView?.text = if (cfg.projectPath.isNotBlank()) "Godot 4.7.2 · Live" else "Godot 4.7.2"
+        editButton?.visibility = if (BuildConfig.GODOT_EDITOR_BUILD && cfg.projectPath.isNotBlank()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+    }
+
     private fun buildFloatingIdeOverlay(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             val padH = dp(10)
-            val padV = dp(4)
+            val padV = dp(2)
             setPadding(padH, padV, padH, padV)
             background = GradientDrawable().apply {
-                setColor(Color.argb(215, 11, 17, 32))
-                cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), Color.argb(140, 56, 189, 248))
+                setColor(Color.argb(220, 11, 17, 32))
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), Color.argb(150, 56, 189, 248))
             }
         }
 
@@ -84,28 +117,29 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
             text = "Godot 4.7.2"
             setTextColor(Color.rgb(52, 211, 153))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(0, 0, dp(8), 0)
+            setPadding(0, 0, dp(6), 0)
         }
+        badgeView = badge
         bar.addView(badge)
 
-        if (BuildConfig.GODOT_EDITOR_BUILD && intent?.getStringExtra(EXTRA_PROJECT_PATH) != null) {
-            val editBtn = Button(this).apply {
-                text = "Edit"
-                isAllCaps = false
-                setTextColor(Color.rgb(56, 189, 248))
-                setBackgroundColor(Color.TRANSPARENT)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                minWidth = dp(48)
-                minHeight = dp(36)
-                setPadding(dp(6), 0, dp(6), 0)
-                setOnClickListener {
-                    val path = intent?.getStringExtra(EXTRA_PROJECT_PATH)
-                    startActivity(GodotEditorActivity.createIntent(this@GodotRuntimeActivity, projectPath = path))
-                    finish()
-                }
+        val editBtn = Button(this).apply {
+            text = "Edit"
+            isAllCaps = false
+            setTextColor(Color.rgb(56, 189, 248))
+            setBackgroundColor(Color.TRANSPARENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            minWidth = dp(48)
+            minHeight = dp(48)
+            setPadding(dp(6), 0, dp(6), 0)
+            contentDescription = "Edit project in Godot 4.7.2 Editor"
+            setOnClickListener {
+                val path = currentLaunchConfig().projectPath
+                startActivity(GodotEditorActivity.createIntent(this@GodotRuntimeActivity, projectPath = path))
+                finish()
             }
-            bar.addView(editBtn)
         }
+        editButton = editBtn
+        bar.addView(editBtn)
 
         val pingBtn = Button(this).apply {
             text = "Ping IDE"
@@ -114,8 +148,9 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
             setBackgroundColor(Color.TRANSPARENT)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             minWidth = dp(48)
-            minHeight = dp(36)
+            minHeight = dp(48)
             setPadding(dp(6), 0, dp(6), 0)
+            contentDescription = "Send live ping to Godot scene and IDE"
             setOnClickListener {
                 bridgePlugin?.dispatchIdeCommand("pulse_from_overlay")
             }
@@ -129,8 +164,9 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
             setBackgroundColor(Color.TRANSPARENT)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             minWidth = dp(48)
-            minHeight = dp(36)
+            minHeight = dp(48)
             setPadding(dp(6), 0, dp(2), 0)
+            contentDescription = "Return to Automation Studio IDE"
             setOnClickListener { finish() }
         }
         bar.addView(backBtn)
@@ -164,26 +200,28 @@ class GodotRuntimeActivity : FragmentActivity(), GodotHost {
     override fun getGodot(): Godot? = godotFragment?.godot
 
     override fun getHostPlugins(godot: Godot): Set<GodotPlugin> {
-        val plugin = AutomationStudioGodotPlugin(godot)
+        val plugin = AutomationStudioGodotPlugin(
+            godot = godot,
+            launchConfigProvider = { currentLaunchConfig() },
+            onOpenRuntimeRequested = { projectPath, mainScene ->
+                val cfg = currentLaunchConfig()
+                val nextPath = projectPath.ifBlank { cfg.projectPath }
+                val nextScene = mainScene.ifBlank { cfg.mainScene }
+                intent = createIntent(this, projectPath = nextPath, mainScene = nextScene)
+                refreshOverlayState()
+                bridgePlugin?.dispatchIdeCommand("reload_workspace")
+            }
+        )
         bridgePlugin = plugin
         return setOf(plugin)
     }
 
     override fun getCommandLine(): List<String> {
-        val cliArgs = intent?.getStringArrayListExtra(EXTRA_CLI_ARGS)
-        if (!cliArgs.isNullOrEmpty()) {
-            return super<GodotHost>.getCommandLine() + cliArgs
-        }
-        val args = super<GodotHost>.getCommandLine().toMutableList()
-        val projectPath = intent?.getStringExtra(EXTRA_PROJECT_PATH)
-        if (!projectPath.isNullOrBlank()) {
-            args += listOf("--path", projectPath)
-        }
-        val mainScene = intent?.getStringExtra(EXTRA_MAIN_SCENE)
-        if (!mainScene.isNullOrBlank()) {
-            args += listOf("--scene", mainScene)
-        }
-        return args
+        val cliArgs = intent?.getStringArrayListExtra(EXTRA_CLI_ARGS).orEmpty()
+        return GodotCommandLineSanitizer.sanitizeCommandLine(
+            rawArgs = cliArgs,
+            baseArgs = super<GodotHost>.getCommandLine()
+        )
     }
 
     override fun onGodotForceQuit(godot: Godot) {
